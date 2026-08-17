@@ -160,6 +160,8 @@ def collect_paper_evidence(
     source_refs: Iterable[str],
     *,
     total_limit: int = 40000,
+    query: str = "",
+    prioritize_research_sections: bool = False,
 ) -> list[dict]:
     records: list[dict] = []
     used = 0
@@ -169,6 +171,8 @@ def collect_paper_evidence(
             continue
         suffix = source.suffix.lower()
         extracted = _extract_source_blocks(source)
+        if suffix == ".pdf" and prioritize_research_sections:
+            extracted = _prioritize_research_blocks(extracted, query)
         if not extracted and suffix in IMAGE_EXTENSIONS:
             extracted = [(None, "", "visual")]
         for page, text, evidence_type in extracted:
@@ -189,6 +193,45 @@ def collect_paper_evidence(
             if len(records) >= 100 or used >= total_limit:
                 return records
     return records
+
+
+def _prioritize_research_blocks(
+    blocks: list[tuple[int | None, str, str]],
+    query: str,
+) -> list[tuple[int | None, str, str]]:
+    query_terms = {
+        term.casefold()
+        for term in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,}", query)
+    }
+    section_weights = {
+        "future work": 140,
+        "future direction": 120,
+        "limitation": 120,
+        "limitations": 120,
+        "discussion": 110,
+        "conclusion": 100,
+        "open problem": 90,
+        "remain an open": 80,
+        "challenge": 35,
+        "ablation": 30,
+        "experiment": 20,
+        "结果": 20,
+        "讨论": 110,
+        "局限": 120,
+        "未来工作": 140,
+        "结论": 100,
+        "开放问题": 90,
+    }
+
+    def score(item: tuple[int | None, str, str]) -> tuple[int, int]:
+        page, text, _ = item
+        normalized = text.casefold()
+        value = 45 if page == 1 else 0
+        value += sum(weight * normalized.count(term) for term, weight in section_weights.items())
+        value += sum(8 * normalized.count(term) for term in query_terms)
+        return value, -(page or 0)
+
+    return sorted(blocks, key=score, reverse=True)
 
 
 def paper_evidence_to_json(records: Iterable[dict]) -> str:

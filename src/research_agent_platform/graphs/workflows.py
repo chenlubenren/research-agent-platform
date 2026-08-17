@@ -12,6 +12,7 @@ class StageDefinition:
     artifact_kind: str
     required_sections: list[str]
     skill_paths: list[str] = field(default_factory=list)
+    model_role: str = "default"
     hitl: bool = False
     checkpoint_title: str = ""
 
@@ -144,15 +145,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Decision Required",
                     ],
                     skill_paths=_skills(
-                        "idea-discovery",
-                        "prior-art-search",
-                        "openalex",
-                        "semantic-scholar",
-                        "arxiv",
-                        "deepxiv",
-                        "comm-lit-review",
-                        "novelty-check",
+                        "platform-idea-generation",
                     ),
+                    model_role="idea_generator",
                     hitl=True,
                     checkpoint_title="Topic Selection Approval",
                 ),
@@ -177,39 +172,38 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Verification Verdict",
                     ],
                     skill_paths=_skills(
-                        "novelty-check",
-                        "prior-art-search",
-                        "kill-argument",
-                        "research-review",
-                        "idea-discovery-robot",
+                        "platform-idea-critique",
                     ),
+                    model_role="idea_critic",
                 ),
                 StageDefinition(
                     name="final_idea",
                     title="Final Idea",
                     instruction=(
-                        "Consolidate the chosen candidate and verification findings into a concise final research idea that can "
-                        "be handed to /plan. Preserve evidence caveats, define the problem anchor, method thesis, dominant "
-                        "contribution, falsifiable prediction, scope boundary, and unresolved risks."
+                        "Consolidate the locked candidate and verification findings into a professional, readable Chinese "
+                        "research Idea for graduate and doctoral researchers. Explain why the problem matters, what the closest "
+                        "evidence-backed gap is, how the proposed mechanism addresses it, what the dominant contribution is, and "
+                        "how the idea could be falsified. Keep facts, evidence-backed inference, and unverified assumptions "
+                        "clearly separated. Preserve evidence caveats and hand only high-level validation requirements to /plan "
+                        "instead of drafting a complete experiment plan."
                     ),
                     artifact_path="idea/FINAL_IDEA.md",
                     artifact_kind="report",
                     required_sections=[
-                        "Problem Anchor",
-                        "Method Thesis",
-                        "Dominant Contribution",
-                        "Falsifiable Prediction",
-                        "Evidence Basis",
-                        "Scope Boundary",
-                        "Open Risks",
-                        "Handoff to Plan",
+                        "一句话研究 Idea",
+                        "研究背景与核心问题",
+                        "现有研究不足与可切入空白",
+                        "核心假设与方法思路",
+                        "预期创新与学术价值",
+                        "可证伪预测",
+                        "证据依据",
+                        "适用边界、风险与不确定性",
+                        "交给实验方案模块的下一步",
                     ],
                     skill_paths=_skills(
-                        "research-refine",
-                        "invention-structuring",
-                        "claims-drafting",
-                        "research-review",
+                        "platform-idea-finalization",
                     ),
+                    model_role="idea_finalizer",
                 ),
             ],
         ),
@@ -1115,10 +1109,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Reuse Cues",
                     ],
                     skill_paths=_skills(
-                        "research-wiki",
-                        "wiki-enrich",
-                        "research-review",
-                        "result-to-claim",
+                        "platform-research-wiki",
                     ),
                 ),
                 StageDefinition(
@@ -1133,9 +1124,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "Future Retrieval Prompts",
                     ],
                     skill_paths=_skills(
-                        "research-wiki",
-                        "wiki-enrich",
-                        "research-pipeline",
+                        "platform-research-wiki",
                     ),
                 ),
             ],

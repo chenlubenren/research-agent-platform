@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from research_agent_platform import agent as agent_module
+from research_agent_platform import paper_pipeline as paper_pipeline_module
 from research_agent_platform.agent import ResearchAgentService
 from research_agent_platform.models import UploadBatchRecord
 from research_agent_platform.paper_pipeline import (
@@ -60,6 +61,33 @@ def test_collect_paper_evidence_assigns_stable_ids(tmp_path: Path):
     assert first == second
     assert first[0]["evidence_id"].startswith("PE-")
     assert first[0]["source_path"] == "plan/notes.md"
+
+
+def test_collect_paper_evidence_prioritizes_future_work_pages(tmp_path: Path, monkeypatch):
+    source = tmp_path / "paper" / "uploads" / "research.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(
+        paper_pipeline_module,
+        "_extract_source_blocks",
+        lambda _path: [
+            (1, "Introduction and problem statement. " * 35, "document_text"),
+            (2, "Method details and equations. " * 35, "document_text"),
+            (3, "Additional implementation details. " * 35, "document_text"),
+            (8, "Conclusion. Interesting directions for future work include attention. " * 18, "document_text"),
+        ],
+    )
+
+    records = collect_paper_evidence(
+        tmp_path,
+        ["paper/uploads/research.pdf"],
+        total_limit=2600,
+        query="Discussion limitations and future work",
+        prioritize_research_sections=True,
+    )
+
+    assert [record["page"] for record in records][:2] == [8, 1]
+    assert "future work" in records[0]["excerpt"].lower()
 
 
 def test_write_evidence_cache_is_bound_to_task_source_set(service: ResearchAgentService):

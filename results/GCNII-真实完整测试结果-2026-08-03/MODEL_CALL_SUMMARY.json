@@ -1,0 +1,62 @@
+[
+  {
+    "call": 1,
+    "stage": "wiki-paper-summary",
+    "requested_model": "codex-cli-gpt-5.6-sol",
+    "actual_model_channel": "codex-cli-gpt-5.6-sol",
+    "temperature_requested": 0.15,
+    "elapsed_seconds": 81.197,
+    "system_prompt_chars": 246,
+    "user_prompt_chars": 10147,
+    "output_chars": 4258,
+    "output_path": "/Users/ycl/Desktop/自动化研究/research-agent-platform/test-runs/2026-08-03-real-gcnii-v6-professional-output-codex/model-calls/01-wiki-paper-summary/output.md"
+  },
+  {
+    "call": 2,
+    "stage": "idea-candidates",
+    "requested_model": "codex-cli-gpt-5.6-sol",
+    "actual_model_channel": "codex-cli-gpt-5.6-sol",
+    "temperature_requested": 0.35,
+    "elapsed_seconds": 68.069,
+    "system_prompt_chars": 4126,
+    "user_prompt_chars": 16239,
+    "output_chars": 3343,
+    "output_path": "/Users/ycl/Desktop/自动化研究/research-agent-platform/test-runs/2026-08-03-real-gcnii-v6-professional-output-codex/model-calls/02-idea-candidates/output.md"
+  },
+  {
+    "call": 3,
+    "stage": "idea-verification",
+    "requested_model": "codex-cli-gpt-5.6-sol",
+    "actual_model_channel": "codex-cli-gpt-5.6-sol",
+    "temperature_requested": 0.35,
+    "elapsed_seconds": 36.987,
+    "system_prompt_chars": 4021,
+    "user_prompt_chars": 20259,
+    "output_chars": 2326,
+    "output_path": "/Users/ycl/Desktop/自动化研究/research-agent-platform/test-runs/2026-08-03-real-gcnii-v6-professional-output-codex/model-calls/03-idea-verification/output.md"
+  },
+  {
+    "call": 4,
+    "stage": "final-idea",
+    "requested_model": "codex-cli-gpt-5.6-sol",
+    "actual_model_channel": "codex-cli-gpt-5.6-sol",
+    "temperature_requested": 0.35,
+    "elapsed_seconds": 58.772,
+    "system_prompt_chars": 4360,
+    "user_prompt_chars": 21854,
+    "output_chars": 3809,
+    "output_path": "/Users/ycl/Desktop/自动化研究/research-agent-platform/test-runs/2026-08-03-real-gcnii-v6-professional-output-codex/model-calls/04-final-idea/output.md"
+  },
+  {
+    "call": 5,
+    "stage": "research-contract",
+    "requested_model": null,
+    "actual_model_channel": "codex-cli-gpt-5.6-sol",
+    "temperature_requested": 0.2,
+    "elapsed_seconds": 42.99,
+    "system_prompt_chars": 76,
+    "user_prompt_chars": 14557,
+    "output_chars": 3435,
+    "output_path": "/Users/ycl/Desktop/自动化研究/research-agent-platform/test-runs/2026-08-03-real-gcnii-v6-professional-output-codex/model-calls/05-research-contract/output.md"
+  }
+]

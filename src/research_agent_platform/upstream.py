@@ -33,6 +33,15 @@ class GeneratedImage:
     output_format: str
 
 
+def configured_model_for_role(role: str) -> str | None:
+    role_models = {
+        "idea_generator": config.idea_generator_model,
+        "idea_critic": config.idea_critic_model,
+        "idea_finalizer": config.idea_final_model,
+    }
+    return role_models.get(role, "") or config.upstream_model or None
+
+
 def _headers() -> dict[str, str]:
     if not config.upstream_api_key:
         raise HTTPException(status_code=500, detail="Missing UPSTREAM_API_KEY")
@@ -63,6 +72,15 @@ async def list_models() -> dict[str, Any]:
 
 def _normalize_model_id(model_id: str) -> str:
     return model_id.strip().lower()
+
+
+def _normalize_temperature(model_id: str, temperature: float | None) -> float | None:
+    if temperature is None:
+        return None
+    normalized = _normalize_model_id(model_id)
+    if normalized.startswith("kimi-k2"):
+        return 1.0
+    return temperature
 
 
 def _is_chat_friendly_model(model_id: str) -> bool:
@@ -118,7 +136,13 @@ async def resolve_model(requested_model: str | None = None) -> str:
 
 async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
     forwarded = dict(payload)
-    forwarded["model"] = await resolve_model(payload.get("model"))
+    selected_model = await resolve_model(payload.get("model"))
+    forwarded["model"] = selected_model
+    if "temperature" in forwarded:
+        forwarded["temperature"] = _normalize_temperature(
+            selected_model,
+            forwarded.get("temperature"),
+        )
     return await _request("POST", "/chat/completions", forwarded)
 
 

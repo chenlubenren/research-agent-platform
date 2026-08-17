@@ -1,0 +1,48 @@
+{
+  "task_id": "task_a0d4843af976",
+  "orchestration": "single-herness-stage-routing",
+  "stages": [
+    {
+      "stage": "idea_candidates",
+      "model_role": "idea_generator",
+      "model": "codex-cli-gpt-5.6-sol",
+      "fallback_used": false,
+      "elapsed_ms": 68085.94,
+      "recorded_at": "2026-08-03T11:39:12Z"
+    },
+    {
+      "stage": "idea_verification",
+      "model_role": "idea_critic",
+      "model": "codex-cli-gpt-5.6-sol",
+      "fallback_used": false,
+      "elapsed_ms": 37001.9,
+      "recorded_at": "2026-08-03T11:39:50Z"
+    },
+    {
+      "stage": "final_idea",
+      "model_role": "idea_finalizer",
+      "model": "codex-cli-gpt-5.6-sol",
+      "fallback_used": false,
+      "elapsed_ms": 58811.58,
+      "recorded_at": "2026-08-03T11:40:51Z"
+    }
+  ],
+  "evidence_validation": {
+    "status": "pass",
+    "allowed_ids": [
+      "P-FDA616230E48",
+      "PE-3F8784BD52",
+      "PE-7478DC0147"
+    ],
+    "referenced_ids": [
+      "PE-3F8784BD52",
+      "PE-7478DC0147"
+    ],
+    "invalid_ids": [],
+    "page_linked_ids": [
+      "PE-3F8784BD52",
+      "PE-7478DC0147"
+    ],
+    "unpaged_ids": []
+  }
+}
