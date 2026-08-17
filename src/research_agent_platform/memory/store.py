@@ -19,6 +19,7 @@ class WikiPaper:
 
 
 class ResearchWikiStore:
+    DEFAULT_IDEA_MINIMUM_PAPERS = 5
     SUMMARY_SECTIONS = (
         "研究问题",
         "核心方法",
@@ -26,9 +27,12 @@ class ResearchWikiStore:
         "主要结果",
         "作者讨论与局限",
         "作者提出的未来工作",
+        "作者明确指出的 Gap",
+        "基于证据推断的 Gap",
         "可复用证据",
         "与其他论文的关系",
         "对 Idea 生成的提示",
+        "证据边界与未确认内容",
     )
 
     def __init__(self, workspace_root: str | Path) -> None:
@@ -105,9 +109,12 @@ class ResearchWikiStore:
             "## 主要结果\n\n- 待根据论文证据补充。\n\n"
             "## 作者讨论与局限\n\n- 未确认。\n\n"
             "## 作者提出的未来工作\n\n- 未确认。\n\n"
+            "## 作者明确指出的 Gap\n\n- 未确认。\n\n"
+            "## 基于证据推断的 Gap\n\n- 未确认。\n\n"
             f"## 可复用证据\n\n{evidence_block}\n\n"
             "## 与其他论文的关系\n\n- 暂无已验证关系。\n\n"
-            "## 对 Idea 生成的提示\n\n- 仅使用上方可定位证据，证据不足处保持不确定。"
+            "## 对 Idea 生成的提示\n\n- 仅使用上方可定位证据，证据不足处保持不确定。\n\n"
+            "## 证据边界与未确认内容\n\n- 未确认。"
         )
 
     def rebuild_index(self) -> str:
@@ -134,7 +141,7 @@ class ResearchWikiStore:
         ranked.sort(key=lambda item: (-item[0], item[1].paper_id))
         selected = ranked[:limit]
         per_paper_limit = max(
-            1400,
+            450,
             min(5000, (character_limit - 900) // max(1, len(selected))),
         )
         lines = [
@@ -144,6 +151,9 @@ class ResearchWikiStore:
             f"- Selected papers: {len(selected)}",
             "",
         ]
+        coverage = self.coverage_report()
+        lines.extend(self._coverage_lines(coverage))
+        lines.extend(self._evidence_matrix_lines())
         if not selected:
             lines.extend(["## Evidence Limitations", "", "- Wiki 中暂无可用论文。"])
             return "\n".join(lines) + "\n"
@@ -165,13 +175,139 @@ class ResearchWikiStore:
             lines.extend(paper_block)
         lines.extend(
             [
+                *self._reference_inventory_lines(),
                 "## Evidence Limitations",
                 "",
                 "- 只使用以上论文页面中已记录的 Evidence ID。",
+                "- `unavailable`、`unresolved` 和 `skipped_limit` 参考文献只有引用元数据，不属于已阅读证据。",
                 "- 模型推断不能替代论文作者明确陈述。",
             ]
         )
         return ("\n".join(lines) + "\n")[:character_limit]
+
+    def _reference_inventory_lines(self) -> list[str]:
+        catalog_path = self.wiki_root / "reference_catalog.json"
+        if not catalog_path.exists():
+            return []
+        try:
+            payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+        records = payload.get("records", []) if isinstance(payload, dict) else []
+        if not isinstance(records, list) or not records:
+            return []
+        lines = [
+                "## Metadata-only Reference Inventory",
+            "",
+            "以下为输入论文的直接参考文献目录。只有绑定 Paper ID 的条目已进入 Wiki 证据库。",
+            "",
+        ]
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            reference_id = str(item.get("reference_id") or "")
+            title = str(item.get("resolved_title") or item.get("title") or item.get("raw_text") or "")
+            status = str(item.get("status") or "unknown")
+            paper_id = str(item.get("paper_id") or "")
+            suffix = f" -> `{paper_id}`" if paper_id else " -> 仅元数据"
+            lines.append(f"- `{reference_id}` | `{status}` | {title[:180]}{suffix}")
+        lines.append("")
+        return lines
+
+    def coverage_report(self, *, minimum_papers: int | None = None) -> dict:
+        minimum = minimum_papers or self.DEFAULT_IDEA_MINIMUM_PAPERS
+        papers = self.list_papers()
+        catalog_records = self._reference_catalog_records()
+        metadata_only = sum(
+            1
+            for record in catalog_records
+            if str(record.get("status") or "") not in {"downloaded", "duplicate"}
+        )
+        return {
+            "minimum_papers": minimum,
+            "full_text_papers": len(papers),
+            "full_text_paper_ids": [paper.paper_id for paper in papers],
+            "downloaded_reference_papers": sum(
+                1
+                for record in catalog_records
+                if str(record.get("status") or "") in {"downloaded", "duplicate"}
+            ),
+            "metadata_only_references": metadata_only,
+            "reference_records": len(catalog_records),
+            "ready_for_top_journal_candidate": len(papers) >= minimum,
+        }
+
+    def _coverage_lines(self, coverage: dict) -> list[str]:
+        ready = "是" if coverage["ready_for_top_journal_candidate"] else "否"
+        lines = [
+            "## Evidence Coverage",
+            "",
+            f"- 完整可读论文数: {coverage['full_text_papers']}",
+            f"- Idea 定稿最低要求: {coverage['minimum_papers']}",
+            f"- 仅元数据参考文献数: {coverage['metadata_only_references']}",
+            f"- 参考文献记录总数: {coverage['reference_records']}",
+            f"- 是否达到顶刊候选门槛: {ready}",
+            f"- 可作为证据的 Paper ID: {', '.join(f'`{item}`' for item in coverage['full_text_paper_ids']) or '暂无'}",
+            "- 仅元数据或下载失败的参考文献不能作为已读证据。",
+            "",
+        ]
+        return lines
+
+    def _evidence_matrix_lines(self) -> list[str]:
+        lines = [
+            "## Cross-Paper Evidence Matrix",
+            "",
+            "| 论文 | 已解决问题 | 方法机制 | 已知局限 | 作者 Future Work | 可支持方向 | Evidence ID |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for paper in self.list_papers():
+            summary_path = self._workspace_path(paper.summary_relative_path)
+            try:
+                summary = summary_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            values = {
+                "已解决问题": self._summary_section_excerpt(summary, "研究问题"),
+                "方法机制": self._summary_section_excerpt(summary, "核心方法"),
+                "已知局限": self._summary_section_excerpt(summary, "作者讨论与局限"),
+                "作者 Future Work": self._summary_section_excerpt(summary, "作者提出的未来工作"),
+                "可支持方向": self._summary_section_excerpt(summary, "对 Idea 生成的提示"),
+            }
+            evidence_ids = sorted(set(re.findall(r"\bPE-[A-F0-9]{10}\b", summary, re.I)))
+            cells = [
+                f"`{paper.paper_id}` {paper.title[:80]}",
+                *[self._matrix_cell(values[key]) for key in ("已解决问题", "方法机制", "已知局限", "作者 Future Work", "可支持方向")],
+                self._matrix_cell(", ".join(evidence_ids[:8]) or "未记录"),
+            ]
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+        return lines
+
+    def _reference_catalog_records(self) -> list[dict]:
+        catalog_path = self.wiki_root / "reference_catalog.json"
+        if not catalog_path.exists():
+            return []
+        try:
+            payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+        records = payload.get("records", []) if isinstance(payload, dict) else []
+        return [record for record in records if isinstance(record, dict)]
+
+    @staticmethod
+    def _summary_section_excerpt(summary: str, title: str, limit: int = 220) -> str:
+        match = re.search(
+            rf"(?ms)^##\s*{re.escape(title)}\s*\n(.*?)(?=^##\s|\Z)",
+            summary,
+        )
+        if not match:
+            return "未记录"
+        excerpt = re.sub(r"\s+", " ", match.group(1)).strip()
+        return excerpt[:limit] or "未确认"
+
+    @staticmethod
+    def _matrix_cell(value: str) -> str:
+        return value.replace("|", "\\|").replace("\n", " ")[:240]
 
     @staticmethod
     def _summary_excerpt(summary: str, query_terms: list[str], limit: int) -> str:
@@ -266,6 +402,35 @@ class ResearchWikiStore:
                     "target": f"paper:{paper_id}",
                     "relation": "idea_based_on",
                     "evidence": "wiki query pack",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            existing.add(relation)
+        relations_path.write_text("\n".join(sorted(existing)) + ("\n" if existing else ""), encoding="utf-8")
+        return "wiki/relations.jsonl"
+
+    def append_citation_relations(
+        self,
+        source_paper_id: str,
+        references: Iterable[dict],
+    ) -> str:
+        relations_path = self.wiki_root / "relations.jsonl"
+        existing = {
+            line.strip()
+            for line in relations_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if line.strip()
+        } if relations_path.exists() else set()
+        for reference in references:
+            target_paper_id = str(reference.get("paper_id") or "")
+            if not target_paper_id:
+                continue
+            relation = json.dumps(
+                {
+                    "source": f"paper:{source_paper_id}",
+                    "target": f"paper:{target_paper_id}",
+                    "relation": "cites",
+                    "evidence": str(reference.get("reference_id") or "reference list"),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
