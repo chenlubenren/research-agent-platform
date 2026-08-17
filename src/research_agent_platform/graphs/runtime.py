@@ -267,8 +267,6 @@ class LangGraphWorkflowRuntime:
             task = self._load_task(state)
             if task.command == "/idea":
                 await self.service._write_research_contract(task)
-            if task.command == "/fig":
-                task.artifacts.extend(await self.service._write_figure_delivery_artifacts(task))
             if task.command == "/write":
                 task.artifacts.extend(await self.service._write_delivery_artifacts(task))
             if task.command == "/rebuttal":

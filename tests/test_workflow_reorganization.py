@@ -164,6 +164,12 @@ def test_reorganized_workflow_boundaries():
         "paper_revision",
         "final_quality_gate",
     ]
+    assert [stage.name for stage in workflows["/fig"].stage_definitions] == [
+        "figure_contract",
+        "figure_design",
+        "figure_render_and_qa",
+        "figure_delivery",
+    ]
 
     revision = next(stage for stage in workflows["/write"].stage_definitions if stage.name == "paper_revision")
     assert "observed mean" in revision.instruction.lower()

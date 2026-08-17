@@ -69,6 +69,12 @@ class AppConfig(BaseModel):
     image_request_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("IMAGE_REQUEST_TIMEOUT_SECONDS", "300"))
     )
+    edit_banana_base_url: str = Field(
+        default_factory=lambda: os.getenv("EDIT_BANANA_BASE_URL", "").rstrip("/")
+    )
+    edit_banana_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("EDIT_BANANA_TIMEOUT_SECONDS", "300"))
+    )
     presentation_template: str = Field(
         default_factory=lambda: os.getenv("PRESENTATION_TEMPLATE", "auto")
     )

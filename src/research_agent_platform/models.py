@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -13,6 +13,15 @@ RouteSource = Literal["explicit", "implicit_heuristic", "implicit_llm", "approva
 PresentationType = Literal["paper", "stage"]
 PresentationSourceScope = Literal["auto", "attachments", "selected", "session", "workspace"]
 DownloadSourceScope = Literal["auto", "attachments", "selected", "session", "workspace"]
+FigureKind = Literal[
+    "data_plot",
+    "framework_diagram",
+    "mechanism_diagram",
+    "reference_reproduction",
+]
+FigureRenderer = Literal["matplotlib", "academic_svg", "drawio", "figurespec"]
+FigureEditability = Literal["publication_vector", "structural"]
+FigureSourceScope = Literal["auto", "attachments", "selected", "workspace"]
 CloudSyncStatus = Literal["disabled", "pending", "synced", "error"]
 ArtifactKind = Literal[
     "report",
@@ -95,6 +104,123 @@ class DownloadSourceConfig(BaseModel):
     selection_reason: str = ""
 
 
+class FigureSourceConfig(BaseModel):
+    requested_scope: FigureSourceScope = "auto"
+    resolved_scope: FigureSourceScope
+    source_refs: list[str] = Field(default_factory=list)
+    data_refs: list[str] = Field(default_factory=list)
+    image_refs: list[str] = Field(default_factory=list)
+    upload_batch_id: str = ""
+    selection_reason: str = ""
+
+
+class FigurePanel(BaseModel):
+    panel_id: str
+    title: str
+    purpose: str = ""
+
+
+class FigureEntity(BaseModel):
+    entity_id: str
+    label: str
+    role: str = "component"
+    panel_id: str = "a"
+
+
+class FigureRelation(BaseModel):
+    source: str
+    target: str
+    label: str = ""
+    relation_type: Literal["flow", "inhibition", "feedback", "association"] = "flow"
+
+
+class FigureContract(BaseModel):
+    schema_version: str = "1.0"
+    figure_id: str = "FIGURE_01"
+    kind: FigureKind
+    renderer: FigureRenderer
+    route_reason: str
+    purpose: str
+    core_claim: str
+    panels: list[FigurePanel] = Field(default_factory=list)
+    entities: list[FigureEntity] = Field(default_factory=list)
+    relations: list[FigureRelation] = Field(default_factory=list)
+    label_allowlist: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    language: str = "English"
+    target_width_px: int = 1600
+    target_height_px: int = 960
+    editability: FigureEditability = "publication_vector"
+    editability_required: bool = True
+    prohibited_content: list[str] = Field(default_factory=list)
+    decision_required: bool = False
+    decision_question: str = ""
+
+
+class VisualStyleSpec(BaseModel):
+    schema_version: str = "1.0"
+    preset: Literal["academic_clean", "playful_academic"] = "academic_clean"
+    palette: list[str] = Field(default_factory=list)
+    font_family: str = "Arial"
+    cjk_font_family: str = "PingFang SC"
+    corner_radius: int = 12
+    hatch_backgrounds: bool = False
+    icon_density: Literal["none", "low", "medium"] = "low"
+    arrow_style: str = "academic"
+    panel_style: str = "subtle"
+
+
+class LayoutPlan(BaseModel):
+    """Renderer-neutral topology and reading-order intent, without final coordinates."""
+
+    schema_version: str = "1.0"
+    reading_direction: Literal["RIGHT", "DOWN"] = "RIGHT"
+    panel_order: list[str] = Field(default_factory=list)
+    node_order: list[str] = Field(default_factory=list)
+    groups: dict[str, list[str]] = Field(default_factory=dict)
+    port_preferences: dict[str, Literal["NORTH", "SOUTH", "EAST", "WEST"]] = Field(
+        default_factory=dict
+    )
+    edge_types: dict[str, str] = Field(default_factory=dict)
+
+
+class FigureDeliveryManifest(BaseModel):
+    schema_version: Literal["3.0"] = "3.0"
+    mode: str
+    figure_id: str
+    figure_kind: FigureKind
+    renderer: FigureRenderer
+    backend_skill: str
+    route_reason: str
+    input_files: list[str] = Field(default_factory=list)
+    source_config: FigureSourceConfig
+    contract: str
+    visual_style: str
+    layout_plan: str = ""
+    authoritative_source: str
+    derived_outputs: list[str] = Field(default_factory=list)
+    assist_assets: list[str] = Field(default_factory=list)
+    asset_sources: list[dict[str, Any]] = Field(default_factory=list)
+    editability: FigureEditability
+    layout_engine: str = "not_applicable"
+    canonical: bool = True
+    topology_verified: bool = True
+    raster_inside_drawio: bool = False
+    edit_banana_called: bool = False
+    vlm_called: bool = False
+    caption: str
+    qa: str
+    publication_status: str
+    warnings: list[str] = Field(default_factory=list)
+    wps_handoff: str = ""
+    render_spec: str = ""
+    sheet: str = ""
+    chart_type: str = ""
+    x_column: str = ""
+    y_columns: list[str] = Field(default_factory=list)
+    row_count: int = 0
+
+
 class CloudWorkspaceState(BaseModel):
     provider: str = "seafile"
     status: CloudSyncStatus = "disabled"
@@ -173,6 +299,7 @@ class TaskRun(BaseModel):
     rebuttal_source: RebuttalSourceConfig | None = None
     write_source: WriteSourceConfig | None = None
     download_source: DownloadSourceConfig | None = None
+    figure_source: FigureSourceConfig | None = None
 
 
 class ChatSession(BaseModel):

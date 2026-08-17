@@ -213,7 +213,7 @@ CHAT_PAGE = """<!doctype html>
         a.target = "_blank";
         a.textContent = `${artifact.relative_path} - ${artifact.description}`;
         card.appendChild(a);
-        if (artifact.kind === "image" || /\\.(png|jpg|jpeg|webp|gif)$/i.test(artifact.relative_path || "")) {
+        if (artifact.kind === "image" || /\\.(png|jpg|jpeg|webp|gif|svg)$/i.test(artifact.relative_path || "")) {
           const img = document.createElement("img");
           img.src = artifact.url_path;
           img.alt = artifact.relative_path;
@@ -1282,7 +1282,6 @@ async def responses(
             "progress": result.get("progress", []),
         },
     }
-
 
 
 

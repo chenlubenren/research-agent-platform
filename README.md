@@ -43,7 +43,7 @@ uv run uvicorn --app-dir src research_agent_platform.api:app --host 127.0.0.1 --
 - `/plan` turns `FINAL_IDEA` or a directly supplied research objective into `plan/RESEARCH_BLUEPRINT.md`, `plan/EXPERIMENT_PLAN.md`, and `plan/EXECUTION_CHECKLIST.md`.
 - `/write` freezes an attachment/session/workspace SourceSet, extracts stable evidence IDs, plans and drafts the paper, runs an independent self-review, produces an evidence-preserving revision, and writes deterministic citation/delivery reports before DOCX/PDF/TeX export.
 - `/rebuttal` diagnoses an uploaded or generated manuscript when comments are absent; when reviewer comments are present, it maps each comment to paper evidence, drafts point-by-point replies, produces a revised manuscript and revision ledger, then verifies comment-ID coverage in `REBUTTAL_CLOSURE_REPORT.json`. Simulated peer review and deterministic pre-submission checks are internal stages; they are advisory quality controls, not journal decisions.
-- `/code`, `/fig`, `/present`, and `/wiki` continue implementation planning, figure production, presentation generation, and persistent research memory.
+- `/code`, `/fig`, `/present`, and `/wiki` continue implementation planning, figure production, presentation generation, and persistent research memory. `/fig` freezes a FigureContract, builds a LayoutPlan, measures real text, and uses ELK before creating one shared DiagramRenderSpec. Data plots use reproducible Python; non-data figures default to editable Academic SVG; explicit structural editing uses native Draw.io; reference-image decomposition uses the optional Edit Banana sidecar. Every completed route emits SVG/PDF/PNG plus QA and a v3 delivery manifest.
 
 Each command can run independently. When prior `/review` or `/idea` tasks exist in the same session, downstream commands prioritize their evidence map, research gaps, final idea, and research contract as handoff context.
 
@@ -144,4 +144,4 @@ Set `ARIS_REPO_ROOT` in `.env` only if you intentionally want to override the bu
 
 - If your relay exposes many model ids, set `UPSTREAM_MODEL` explicitly.
 - If `UPSTREAM_MODEL` is empty, the platform now prefers chat-capable models such as `gpt-5.4-mini` instead of taking the first returned model blindly.
-- `/fig` uses `IMAGE_MODEL`, which defaults to `gpt-image-2`.
+- `/fig` uses `IMAGE_MODEL`, which defaults to `gpt-image-2`, only for one optional text-free moodboard on mechanism/reference routes. Image generation is never the canonical source for labels, arrows, or scientific structure.

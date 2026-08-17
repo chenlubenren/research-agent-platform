@@ -1,0 +1,5 @@
+method,accuracy,accuracy_std,latency_ms,latency_ms_std
+Baseline,0.812,0.018,34.2,1.8
+Augmented,0.857,0.014,31.7,1.3
+Filtered,0.884,0.011,28.9,1.1
+Proposed,0.923,0.009,25.4,0.8

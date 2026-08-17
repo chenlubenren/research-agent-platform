@@ -25,7 +25,16 @@ from .document_exports import (
 )
 from .graphs.runtime import LangGraphWorkflowRuntime
 from .graphs.workflows import StageDefinition, WorkflowDefinition, workflow_registry
-from .figure_pipeline import NoRenderableDataError, render_code_figure, select_data_sources
+from .diagram_pipeline import build_layout_plan, render_diagram
+from .edit_banana import convert_reference_to_drawio
+from .figure_contracts import (
+    build_figure_contract,
+    build_visual_style_spec,
+    contract_to_json,
+    resolve_figure_source_config,
+    style_to_json,
+)
+from .figure_pipeline import render_code_figure, validate_code_figure
 from .institutional_access import build_institutional_handoff, institutional_handoff_markdown
 from .literature_downloads import download_public_pdfs, download_public_pdfs_from_sources
 from .literature_sources import (
@@ -39,9 +48,12 @@ from .models import (
     ApprovalCheckpoint,
     ChatSession,
     CloudWorkspaceState,
+    FigureContract,
+    FigureDeliveryManifest,
     MessageRecord,
     ProgressEvent,
     TaskRun,
+    VisualStyleSpec,
     utc_now,
 )
 from .paper_pipeline import (
@@ -1061,6 +1073,12 @@ class ResearchAgentService:
                 session.upload_batches,
                 source_limit=config.write_source_limit,
             )
+        if task.command == "/fig":
+            task.figure_source = resolve_figure_source_config(
+                task.objective,
+                root,
+                session.upload_batches,
+            )
         if task.command == "/download":
             task.download_source = resolve_download_source_config(
                 task.objective,
@@ -1208,8 +1226,6 @@ class ResearchAgentService:
 
         if task.command == "/idea":
             await self._write_research_contract(task)
-        if task.command == "/fig":
-            task.artifacts.extend(await self._write_figure_delivery_artifacts(task))
         if task.command == "/write":
             task.artifacts.extend(await self._write_delivery_artifacts(task))
         if task.command == "/rebuttal":
@@ -1336,6 +1352,78 @@ class ResearchAgentService:
             )
             self.artifacts._write_manifest_for_root(Path(task.artifact_root))
             return artifact
+        if task.command == "/fig" and stage.name == "figure_contract":
+            session = self.store.load_session(task.session_id)
+            source_config = resolve_figure_source_config(
+                task.objective,
+                Path(task.artifact_root),
+                session.upload_batches if session else (),
+            )
+            task.figure_source = source_config
+            contract = build_figure_contract(task.objective, source_config)
+            if contract.kind == "reference_reproduction" and not config.edit_banana_base_url:
+                contract.decision_required = True
+                contract.decision_question = (
+                    "参考图拆解需要配置独立 Edit Banana 服务（EDIT_BANANA_BASE_URL）；"
+                    "当前未配置，系统不会伪造可编辑复刻结果。"
+                )
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                contract_to_json(contract),
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
+        if task.command == "/fig" and stage.name == "figure_design":
+            contract = FigureContract.model_validate_json(
+                self._artifact_text(task, "figures/FIGURE_CONTRACT.json")
+            )
+            style = build_visual_style_spec(contract)
+            layout_plan = build_layout_plan(contract)
+            layout_artifact = self._write_text(
+                task,
+                "figures/LAYOUT_PLAN.json",
+                json.dumps(layout_plan.model_dump(), ensure_ascii=False, indent=2),
+                kind="plan",
+                description="Renderer-neutral reading order, grouping, ports, and topology before coordinates.",
+            )
+            task.artifacts.append(layout_artifact)
+            artifact = self._write_text(
+                task,
+                stage.artifact_path,
+                style_to_json(style),
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
+        if task.command == "/fig" and stage.name == "figure_render_and_qa":
+            rendered_artifacts = await self._write_figure_delivery_artifacts(task)
+            qa_artifact = next(
+                artifact
+                for artifact in rendered_artifacts
+                if artifact.relative_path == "figures/generated/FIGURE_QA.json"
+            )
+            for artifact in rendered_artifacts:
+                if artifact.relative_path not in {
+                    qa_artifact.relative_path,
+                    "figures/generated/FIGURE_DELIVERY.json",
+                }:
+                    task.artifacts.append(artifact)
+            return qa_artifact
+        if task.command == "/fig" and stage.name == "figure_delivery":
+            manifest_path = Path(task.artifact_root, "figures/generated/FIGURE_DELIVERY.json")
+            if not manifest_path.is_file():
+                raise RuntimeError("Figure delivery manifest was not produced by render and QA stage")
+            return self._write_text(
+                task,
+                stage.artifact_path,
+                manifest_path.read_text(encoding="utf-8"),
+                kind=stage.artifact_kind,
+                description=f"{workflow.title} / {stage.title}",
+            )
         if task.command == "/rebuttal" and stage.name == "rebuttal_intake":
             if task.rebuttal_source is None:
                 raise RebuttalInputError("/rebuttal input SourceSet is missing.")
@@ -1490,6 +1578,14 @@ class ResearchAgentService:
         )
         if any(re.search(pattern, objective, re.I) for pattern in explicit_review):
             return True
+        if task.command == "/fig" and stage.name == "figure_contract":
+            try:
+                contract = FigureContract.model_validate_json(
+                    self._artifact_text(task, "figures/FIGURE_CONTRACT.json")
+                )
+            except (ValueError, json.JSONDecodeError):
+                return True
+            return contract.decision_required
         if not stage.hitl:
             return False
         return bool(self._blocking_decision_section(task, stage))
@@ -2874,26 +2970,97 @@ class ResearchAgentService:
         ]
 
     async def _write_figure_delivery_artifacts(self, task: TaskRun) -> list:
-        briefs = self._artifact_text(task, "figures/FIGURE_BRIEFS.md")
-        inventory = self._artifact_excerpt(task, "figures/FIGURE_INVENTORY.md")
-        if not briefs and not inventory:
+        contract_text = self._artifact_text(task, "figures/FIGURE_CONTRACT.json")
+        style_text = self._artifact_text(task, "figures/VISUAL_STYLE_SPEC.json")
+        if not contract_text or not style_text:
             return []
-
+        contract = FigureContract.model_validate_json(contract_text)
+        style = VisualStyleSpec.model_validate_json(style_text)
         session = self.store.load_session(task.session_id)
-        data_sources = select_data_sources(
+        source_config = task.figure_source or resolve_figure_source_config(
+            task.objective,
             Path(task.artifact_root),
             session.upload_batches if session else (),
         )
-        try:
+        task.figure_source = source_config
+        generated: list = []
+        assist_assets: list[str] = []
+        warnings: list[str] = []
+        edit_banana_result = None
+
+        if contract.renderer != "matplotlib" and re.search(
+            r"(?:ImageGen|定制插画|生成插画素材|custom illustration)", task.objective, re.I
+        ):
+            try:
+                image = await generate_image(
+                    prompt=(
+                        "Create one isolated, text-free academic illustration asset on a transparent or white background. "
+                        "Do not include labels, letters, numbers, arrows, panels, or diagram structure."
+                    ),
+                    model=config.image_model,
+                    size="1024x1024",
+                    quality="low",
+                    output_format="png",
+                )
+                illustration = self._write_bytes(
+                    task,
+                    "figures/generated/CUSTOM_ILLUSTRATION.png",
+                    image.image_bytes,
+                    kind="image",
+                    description="Explicitly requested decorative illustration; never a structural source.",
+                )
+                generated.append(illustration)
+                assist_assets.append(illustration.relative_path)
+            except Exception as exc:
+                warnings.append(f"Explicit ImageGen illustration failed: {exc.__class__.__name__}")
+
+        wps_artifact = None
+        if re.search(r"(?:WPS|转\s*PPT|图片转PPT|convert.*ppt)", task.objective, re.I):
+            canonical_extension = {
+                "matplotlib": "py",
+                "figurespec": "svg",
+                "academic_svg": "svg",
+                "drawio": "drawio",
+            }[contract.renderer]
+            wps_artifact = self._write_text(
+                task,
+                "figures/generated/WPS_HANDOFF.json",
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "mode": "manual_handoff",
+                        "external_service": "https://aippt.wps.cn/aippt/convert-ppt/home",
+                        "canonical_source": False,
+                        "canonical_source_candidate": f"figures/generated/FIGURE_01.{canonical_extension}",
+                        "external_upload_performed": False,
+                        "privacy_confirmation_required": True,
+                        "upload_candidate": "figures/generated/FIGURE_01.png",
+                        "label_allowlist": contract.label_allowlist,
+                        "checks_after_conversion": [
+                            "all text matches the label allowlist",
+                            "arrows remain separate and point in the contract direction",
+                            "grouping and occlusion match the canonical preview",
+                            "the PPTX remains a draft; edit the declared canonical source for structural changes",
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                kind="manifest",
+                description="Manual WPS image-to-PPT experiment handoff; no external upload performed.",
+            )
+            generated.append(wps_artifact)
+
+        if contract.renderer == "matplotlib":
             rendered = render_code_figure(
                 Path(task.artifact_root),
                 session.upload_batches if session else (),
                 objective=task.objective,
+                explicit_source_refs=source_config.data_refs,
             )
-        except NoRenderableDataError as exc:
-            rendered = None
-            data_warnings = exc.warnings
-        else:
+            qa = validate_code_figure(rendered)
+            if qa["hard_status"] != "pass":
+                raise RuntimeError("Figure QA failed: " + "; ".join(qa["errors"]))
             image_artifact = self._write_bytes(
                 task,
                 "figures/generated/FIGURE_01.png",
@@ -2906,85 +3073,200 @@ class ResearchAgentService:
                 "figures/generated/FIGURE_01.svg",
                 rendered.svg_bytes,
                 kind="image",
-                description="Editable vector export of the code-rendered research chart.",
+                description="Vector SVG export of the code-rendered research chart.",
             )
-            manifest = {
-                "mode": "code",
-                "input_files": [rendered.source_ref],
+            pdf_artifact = self._write_bytes(
+                task,
+                "figures/generated/FIGURE_01.pdf",
+                rendered.pdf_bytes,
+                kind="document",
+                description="Publication-oriented vector PDF export.",
+            )
+            source_artifact = self._write_text(
+                task,
+                "figures/generated/FIGURE_01.py",
+                rendered.source_code,
+                kind="document",
+                description="Canonical reproducible Python source for the data figure.",
+            )
+            route_metadata = {
                 "sheet": rendered.sheet_name,
                 "chart_type": rendered.chart_type,
                 "x_column": rendered.x_column,
                 "y_columns": rendered.y_columns,
                 "row_count": rendered.row_count,
-                "outputs": [image_artifact.relative_path, svg_artifact.relative_path],
-                "renderer": "matplotlib",
-                "warnings": rendered.warnings,
             }
-            manifest_artifact = self._write_text(
+            warnings.extend(rendered.warnings)
+        else:
+            if contract.kind == "reference_reproduction":
+                if not config.edit_banana_base_url:
+                    raise RuntimeError(
+                        "Edit Banana reference decomposition is unavailable; configure EDIT_BANANA_BASE_URL"
+                    )
+                if not source_config.image_refs:
+                    raise RuntimeError("Reference decomposition requires a frozen image input")
+                edit_banana_result = await convert_reference_to_drawio(
+                    Path(task.artifact_root, source_config.image_refs[0]),
+                    base_url=config.edit_banana_base_url,
+                    timeout_seconds=config.edit_banana_timeout_seconds,
+                    label_allowlist=contract.label_allowlist,
+                )
+                warnings.extend(edit_banana_result.warnings)
+            rendered = render_diagram(contract, style)
+            if edit_banana_result is not None:
+                rendered = replace(rendered, editable_bytes=edit_banana_result.drawio_xml)
+                rendered.qa["publication_status"] = "needs_human_visual_review"
+                rendered.qa["warnings"] = [
+                    *rendered.qa.get("warnings", []),
+                    "Edit Banana output is a non-canonical draft; topology and OCR require human review",
+                ]
+            qa = rendered.qa
+            if qa["hard_status"] != "pass":
+                raise RuntimeError("Figure QA failed: " + "; ".join(qa["errors"]))
+            render_spec_artifact = self._write_text(
                 task,
-                "figures/generated/FIGURE_DELIVERY.json",
-                json.dumps(manifest, ensure_ascii=False, indent=2),
-                kind="manifest",
-                description="Traceable delivery manifest for the generated figure.",
+                "figures/generated/FIGURE_01.render.json",
+                json.dumps(rendered.render_spec, ensure_ascii=False, indent=2),
+                kind="note",
+                description="Renderer-neutral layout specification used for SVG and editable source generation.",
             )
-            self._log_progress(
+            generated.append(render_spec_artifact)
+            image_artifact = self._write_bytes(
                 task,
-                f"检测到明确数据，已通过代码生成 {rendered.chart_type} 图: {image_artifact.relative_path}",
-                kind="figure",
+                "figures/generated/FIGURE_01.png",
+                rendered.png_bytes,
+                kind="image",
+                description="Rendered preview of the editable research diagram.",
             )
-            self.store.save_task(task)
-            return [image_artifact, svg_artifact, manifest_artifact]
+            svg_artifact = self._write_bytes(
+                task,
+                "figures/generated/FIGURE_01.svg",
+                rendered.svg_bytes,
+                kind="image",
+                description="Editable vector SVG export generated from the shared render specification.",
+            )
+            pdf_artifact = self._write_bytes(
+                task,
+                "figures/generated/FIGURE_01.pdf",
+                rendered.pdf_bytes,
+                kind="document",
+                description="Publication-oriented PDF export generated from the shared render specification.",
+            )
+            if rendered.renderer == "academic_svg":
+                source_artifact = svg_artifact
+            else:
+                source_relative = f"figures/generated/FIGURE_01.{rendered.editable_extension}"
+                source_artifact = self._write_bytes(
+                    task,
+                    source_relative,
+                    rendered.editable_bytes,
+                    kind="document",
+                    description=(
+                        "Editable Draw.io source with native text, nodes, and connectors."
+                        if edit_banana_result is None
+                        else "Non-canonical Edit Banana Draw.io reconstruction draft."
+                    ),
+                )
+            route_metadata = {"render_spec": render_spec_artifact.relative_path}
 
-        prompt = await self._build_figure_render_prompt(task, inventory, briefs)
-        prompt_artifact = self._write_text(
+        qa_artifact = self._write_text(
             task,
-            "figures/generated/FIGURE_RENDER_PROMPT.md",
-            prompt,
-            kind="note",
-            description="Render prompt used for gpt-image-2 figure generation.",
+            "figures/generated/FIGURE_QA.json",
+            json.dumps(qa, ensure_ascii=False, indent=2),
+            kind="manifest",
+            description="Deterministic figure quality checks and publication review status.",
         )
-        self._log_progress(task, f"开始调用 {config.image_model} 生成图像")
-        size = self._select_figure_image_size(task.objective, briefs)
-        image = await generate_image(
-            prompt=prompt,
-            model=config.image_model,
-            size=size,
-            quality="low",
-            output_format="png",
+        outputs = [
+            image_artifact.relative_path,
+            svg_artifact.relative_path,
+            pdf_artifact.relative_path,
+        ]
+        resolved_renderer = "matplotlib" if contract.renderer == "matplotlib" else rendered.renderer
+        asset_sources = (
+            list(rendered.render_spec.get("asset_sources", []))
+            if resolved_renderer in {"academic_svg", "drawio"}
+            else []
         )
-        image_artifact = self._write_bytes(
-            task,
-            "figures/generated/FIGURE_01.png",
-            image.image_bytes,
-            kind="image",
-            description=f"Primary generated research figure via {image.model}.",
+        if resolved_renderer in {"academic_svg", "drawio"} and not asset_sources:
+            asset_sources.append(
+                {
+                    "asset": "fallback vector primitives",
+                    "source": "project-authored",
+                    "license": "project-authored",
+                }
+            )
+        asset_sources.extend(
+            {
+                "asset": asset,
+                "source": "OpenAI ImageGen",
+                "license": "generated asset; decorative and non-canonical",
+            }
+            for asset in assist_assets
         )
-        metadata = {
-            "mode": "image2",
-            "input_files": data_sources,
-            "model": image.model,
-            "size": image.size,
-            "quality": image.quality,
-            "output_format": image.output_format,
-            "mime_type": image.mime_type,
-            "revised_prompt": image.revised_prompt,
-            "outputs": [image_artifact.relative_path],
-            "warnings": data_warnings,
-        }
-        metadata_artifact = self._write_text(
+        manifest = FigureDeliveryManifest(
+            mode="code" if resolved_renderer == "matplotlib" else resolved_renderer,
+            figure_id=contract.figure_id,
+            figure_kind=contract.kind,
+            renderer=resolved_renderer,
+            backend_skill={
+                "matplotlib": "paper-figure",
+                "academic_svg": "academic-svg",
+                "drawio": "drawio-figure",
+            }[resolved_renderer],
+            route_reason=contract.route_reason,
+            input_files=source_config.source_refs,
+            source_config=source_config,
+            contract="figures/FIGURE_CONTRACT.json",
+            visual_style="figures/VISUAL_STYLE_SPEC.json",
+            layout_plan=("" if resolved_renderer == "matplotlib" else "figures/LAYOUT_PLAN.json"),
+            authoritative_source=source_artifact.relative_path,
+            derived_outputs=outputs,
+            assist_assets=assist_assets,
+            asset_sources=asset_sources,
+            editability=contract.editability,
+            layout_engine=(
+                "not_applicable"
+                if resolved_renderer == "matplotlib"
+                else str(rendered.render_spec.get("layout_engine", "fallback_grid"))
+            ),
+            canonical=edit_banana_result is None,
+            topology_verified=edit_banana_result is None,
+            raster_inside_drawio=(
+                edit_banana_result.raster_inside_drawio if edit_banana_result else False
+            ),
+            edit_banana_called=edit_banana_result is not None,
+            vlm_called=edit_banana_result.vlm_called if edit_banana_result else False,
+            caption=contract.core_claim,
+            qa=qa_artifact.relative_path,
+            publication_status=qa["publication_status"],
+            warnings=[*warnings, *qa.get("warnings", [])],
+            wps_handoff=wps_artifact.relative_path if wps_artifact else "",
+            **route_metadata,
+        )
+        manifest_artifact = self._write_text(
             task,
             "figures/generated/FIGURE_DELIVERY.json",
-            json.dumps(metadata, ensure_ascii=False, indent=2),
+            json.dumps(manifest.model_dump(), ensure_ascii=False, indent=2),
             kind="manifest",
-            description="Traceable delivery manifest for the generated figure.",
+            description="Figure delivery manifest with canonical source, exports, provenance, and QA status.",
         )
+        for artifact in [
+            image_artifact,
+            svg_artifact,
+            pdf_artifact,
+            source_artifact,
+            qa_artifact,
+            manifest_artifact,
+        ]:
+            if artifact.relative_path not in {item.relative_path for item in generated}:
+                generated.append(artifact)
         self._log_progress(
             task,
-            f"未检测到可精确绘制的数据，已通过 {image.model} 生成科研示意图: {image_artifact.relative_path}",
+            f"已通过 {contract.renderer} 生成可编辑科研图: {image_artifact.relative_path}",
             kind="figure",
         )
         self.store.save_task(task)
-        return [prompt_artifact, image_artifact, metadata_artifact]
+        return generated
 
     async def _write_presentation_delivery_artifacts(self, task: TaskRun) -> list:
         content = self._artifact_text(task, "presentation/SLIDE_CONTENT.md")
@@ -3854,9 +4136,10 @@ class ResearchAgentService:
         manuscript = self._artifact_text(task, "paper/PAPER_REVISED.md") or self._artifact_text(task, "paper/PAPER_DRAFT.md")
         manuscript_block = f"Current paper excerpt:\n{manuscript[:4000]}\n\n" if manuscript else ""
         system_prompt = (
-            "You convert research figure plans into a single production-ready gpt-image-2 prompt. "
+            "You convert research figure plans into a text-free visual moodboard prompt for optional ImageGen assistance. "
             "Return plain prompt text only, no markdown, no bullets. "
-            "Prefer clean academic diagrams, short English labels, high readability, white background, and publication-friendly layout. "
+            "Prefer clean academic styling, restrained colorful icon motifs, white background, and publication-friendly visual hierarchy. "
+            "Do not request labels, arrows, numbers, charts, or scientific structure; those are rebuilt as native editable objects. "
             "If this task belongs to an ongoing session with prior paper, review, plan, or code work, keep the same topic, "
             "claims, terminology, and visual framing instead of inventing a new subject from the figure command alone."
         )
@@ -3870,7 +4153,7 @@ class ResearchAgentService:
             f"Figure inventory:\n{inventory}\n\n"
             f"Figure briefs:\n{briefs[:6000]}\n\n"
             "Choose the single highest-value figure to render first. "
-            "Describe composition, visual hierarchy, color palette, labels, arrows, panel structure, and style constraints clearly enough for image generation. "
+            "Describe visual hierarchy, color palette, panel atmosphere, icon language, and style constraints clearly enough for a moodboard. "
             "When prior session context exists, inherit its topic and evidence rather than defaulting to a generic workflow diagram."
         )
         content = await generate_text(
@@ -3882,9 +4165,9 @@ class ResearchAgentService:
         if prompt:
             return prompt
         fallback = (
-            f"Create a clean academic research figure for: {task.objective}. "
-            "Use a white background, blue and slate accents, clear panel layout, thin arrows, short English labels, and publication-ready typography. "
-            "Make it look like a polished systems or workflow diagram rather than marketing art."
+            f"Create a text-free academic visual moodboard for: {task.objective}. "
+            "Use a white background, restrained accents, playful flat icon motifs, and subtle panel textures. "
+            "Do not include labels, arrows, numbers, charts, or scientific claims."
         )
         return fallback
 

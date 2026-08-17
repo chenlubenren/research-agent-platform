@@ -7,6 +7,8 @@ allowed-tools: Bash(*), Read, Write, Edit
 
 # FigureSpec: Deterministic JSON → SVG Figure Generation
 
+> Legacy compatibility only: new `/fig` tasks map this renderer to `academic_svg` and record a deprecation warning. Do not generate new `.figurespec.json` delivery sources.
+
 Generate publication-quality **architecture diagrams**, **workflow pipelines**, **audit cascades**, and **system topology** figures as editable SVG vector graphics using a deterministic JSON → SVG renderer.
 
 ## When to Use This Skill
@@ -32,6 +34,11 @@ Generate publication-quality **architecture diagrams**, **workflow pipelines**, 
 - **Shape-aware**: edge clipping works correctly for rect/rounded/circle/ellipse/diamond
 - **CJK support**: multi-line labels with proper Chinese character width estimation
 - **No external API**: runs fully local, no network, no API keys
+
+When invoked by `/fig`, treat FigureSpec as a renderer-specific layout source beneath
+`FIGURE_CONTRACT.json`; never replace or rename the semantic FigureContract. Export the
+validated SVG to PNG and PDF through the platform's local PyMuPDF path and verify every
+node label and directed edge against the contract before delivery.
 
 ## Tool Location
 

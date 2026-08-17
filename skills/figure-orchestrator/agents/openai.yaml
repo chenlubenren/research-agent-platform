@@ -1,0 +1,4 @@
+interface:
+  display_name: "Figure Orchestrator"
+  short_description: "Route research figures to editable, evidence-grounded renderers"
+  default_prompt: "Use $figure-orchestrator to design and deliver one editable research figure."

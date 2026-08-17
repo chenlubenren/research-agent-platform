@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "figure_id": "FIGURE_01",
+  "kind": "mechanism_diagram",
+  "renderer": "drawio",
+  "route_reason": "原创多面板机制图验收 fixture",
+  "purpose": "展示风险输入经过过滤、安全增强和人工复核后形成可信输出",
+  "core_claim": "过滤、增强与复核共同提高输出可信度",
+  "panels": [
+    {"panel_id": "a", "title": "攻击与过滤", "purpose": "展示输入风险与过滤过程"},
+    {"panel_id": "b", "title": "增强与评估", "purpose": "展示增强、复核与输出过程"}
+  ],
+  "entities": [
+    {"entity_id": "risk", "label": "风险输入", "role": "attack", "panel_id": "a"},
+    {"entity_id": "filter", "label": "安全过滤器", "role": "security", "panel_id": "a"},
+    {"entity_id": "notice", "label": "阻断提示", "role": "document", "panel_id": "a"},
+    {"entity_id": "augment", "label": "安全增强", "role": "environment", "panel_id": "b"},
+    {"entity_id": "review", "label": "人工复核", "role": "person", "panel_id": "b"},
+    {"entity_id": "output", "label": "可信输出", "role": "result", "panel_id": "b"}
+  ],
+  "relations": [
+    {"source": "risk", "target": "filter", "label": "注入", "relation_type": "flow"},
+    {"source": "filter", "target": "notice", "label": "抑制", "relation_type": "inhibition"},
+    {"source": "notice", "target": "augment", "label": "转换", "relation_type": "association"},
+    {"source": "augment", "target": "review", "label": "反馈", "relation_type": "feedback"},
+    {"source": "review", "target": "output", "label": "输出", "relation_type": "flow"}
+  ],
+  "label_allowlist": [
+    "攻击与过滤", "增强与评估", "风险输入", "安全过滤器", "阻断提示", "安全增强", "人工复核", "可信输出",
+    "注入", "抑制", "转换", "反馈", "输出"
+  ],
+  "evidence_refs": [],
+  "language": "Chinese",
+  "target_width_px": 1600,
+  "target_height_px": 960,
+  "editability_required": true,
+  "prohibited_content": ["标签白名单外文字", "不可追溯定量结论", "栅格化结构文字或箭头"],
+  "decision_required": false,
+  "decision_question": ""
+}
