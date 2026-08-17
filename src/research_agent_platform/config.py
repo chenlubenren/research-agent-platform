@@ -111,6 +111,24 @@ class AppConfig(BaseModel):
     review_download_timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("REVIEW_DOWNLOAD_TIMEOUT_SECONDS", "60"))
     )
+    wiki_reference_expansion_enabled: bool = Field(
+        default_factory=lambda: _env_bool("WIKI_REFERENCE_EXPANSION_ENABLED", True)
+    )
+    wiki_reference_limit: int = Field(
+        default_factory=lambda: int(os.getenv("WIKI_REFERENCE_LIMIT", "100"))
+    )
+    wiki_reference_download_limit: int = Field(
+        default_factory=lambda: int(os.getenv("WIKI_REFERENCE_DOWNLOAD_LIMIT", "100"))
+    )
+    wiki_reference_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("WIKI_REFERENCE_TIMEOUT_SECONDS", "20"))
+    )
+    wiki_idea_query_paper_limit: int = Field(
+        default_factory=lambda: int(os.getenv("WIKI_IDEA_QUERY_PAPER_LIMIT", "100"))
+    )
+    wiki_idea_query_character_limit: int = Field(
+        default_factory=lambda: int(os.getenv("WIKI_IDEA_QUERY_CHARACTER_LIMIT", "36000"))
+    )
     institution_access_enabled: bool = Field(
         default_factory=lambda: _env_bool("INSTITUTION_ACCESS_ENABLED", True)
     )

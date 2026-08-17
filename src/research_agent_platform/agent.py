@@ -84,6 +84,11 @@ from .review_pipeline import (
     review_evidence_is_sufficient,
     review_quality_markdown,
 )
+from .reference_expansion import (
+    ReferenceExpansionResult,
+    expand_pdf_references,
+    reference_catalog_markdown,
+)
 from .router.intent import (
     RouteDecision,
     explicit_route,
@@ -1000,6 +1005,8 @@ class ResearchAgentService:
         evidence_validation: dict | None = None
         if task.command == "/idea" and stage.name == "final_idea":
             content, evidence_validation = self._validate_idea_evidence(task, content)
+            content, novelty_gate = self._apply_idea_novelty_gate(task, content)
+            evidence_validation["novelty_gate"] = novelty_gate
         if task.command == "/idea":
             self._record_idea_trace(
                 task,
@@ -1198,8 +1205,10 @@ class ResearchAgentService:
         wiki_store = ResearchWikiStore(workspace_root)
         artifacts: list = []
         source_refs = discover_pdf_sources(workspace_root)
+        primary_papers: dict[str, WikiPaper] = {}
         for source_ref in source_refs:
             paper = wiki_store.paper_for_source(source_ref)
+            primary_papers[source_ref] = paper
             wiki_store.ensure_pdf_copy(paper)
             artifacts.append(
                 self._record_existing(
@@ -1239,6 +1248,124 @@ class ResearchAgentService:
                 )
             artifacts.append(summary_artifact)
 
+        expansion_results: list[ReferenceExpansionResult] = []
+        if config.wiki_reference_expansion_enabled:
+            uploaded_sources = [source_ref for source_ref in source_refs if "/uploads/" in source_ref]
+            for source_ref in uploaded_sources:
+                primary_paper = primary_papers[source_ref]
+                self._log_progress(
+                    task,
+                    f"正在解析并扩展直接参考文献：{primary_paper.paper_id}",
+                    kind="retrieval",
+                )
+                result = await expand_pdf_references(
+                    source_ref,
+                    workspace_root,
+                    primary_paper_id=primary_paper.paper_id,
+                    limit=config.wiki_reference_limit,
+                    download_limit=config.wiki_reference_download_limit,
+                    timeout_seconds=config.wiki_reference_timeout_seconds,
+                )
+                expansion_results.append(result)
+                artifacts.append(
+                    self._record_existing(
+                        task,
+                        result.manifest_relative_path,
+                        kind="wiki",
+                        description=f"Reference expansion manifest for {primary_paper.paper_id}.",
+                    )
+                )
+                for record in result.records:
+                    if record.status not in {"downloaded", "duplicate"} or not record.source_relative_path:
+                        continue
+                    reference_paper = wiki_store.paper_for_source(record.source_relative_path)
+                    record.paper_id = reference_paper.paper_id
+                    if reference_paper.paper_id == primary_paper.paper_id:
+                        continue
+                    wiki_store.ensure_pdf_copy(reference_paper)
+                    artifacts.append(
+                        self._record_existing(
+                            task,
+                            reference_paper.wiki_pdf_relative_path,
+                            kind="document",
+                            description=f"Wiki PDF copy for cited paper {reference_paper.paper_id}.",
+                        )
+                    )
+                    evidence_records = collect_paper_evidence(
+                        workspace_root,
+                        [record.source_relative_path],
+                        total_limit=18000,
+                        query=task.objective,
+                        prioritize_research_sections=True,
+                    )
+                    if not wiki_store.summary_exists(reference_paper):
+                        generated_summary = await self._generate_wiki_paper_summary(
+                            task,
+                            reference_paper,
+                            evidence_records,
+                        )
+                        summary_content = wiki_store.paper_summary_markdown(reference_paper, generated_summary)
+                        summary_artifact = self._write_text(
+                            task,
+                            reference_paper.summary_relative_path,
+                            summary_content,
+                            kind="wiki",
+                            description=f"Per-paper Wiki summary for cited paper {reference_paper.paper_id}.",
+                        )
+                    else:
+                        summary_artifact = self._record_existing(
+                            task,
+                            reference_paper.summary_relative_path,
+                            kind="wiki",
+                            description=f"Per-paper Wiki summary for cited paper {reference_paper.paper_id}.",
+                        )
+                    artifacts.append(summary_artifact)
+                wiki_store.append_citation_relations(
+                    primary_paper.paper_id,
+                    [record.__dict__ for record in result.records],
+                )
+
+        if expansion_results:
+            catalog_records = [
+                record.__dict__
+                for result in expansion_results
+                for record in result.records
+            ]
+            catalog_json = json.dumps(
+                {
+                    "primary_sources": [result.primary_source for result in expansion_results],
+                    "records": catalog_records,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n"
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "wiki/reference_catalog.json",
+                    catalog_json,
+                    kind="wiki",
+                    description="Reference inventory with download and Wiki ingestion status.",
+                )
+            )
+            artifacts.append(
+                self._write_text(
+                    task,
+                    "wiki/reference_catalog.md",
+                    reference_catalog_markdown(expansion_results),
+                    kind="wiki",
+                    description="Human-readable reference expansion catalog.",
+                )
+            )
+            artifacts.append(
+                self._record_existing(
+                    task,
+                    "wiki/relations.jsonl",
+                    kind="wiki",
+                    description="Paper citation relations for the Research Wiki.",
+                )
+            )
+
         index_artifact = self._write_text(
             task,
             "wiki/index.md",
@@ -1251,7 +1378,16 @@ class ResearchAgentService:
         query = task.objective
         if task.command == "/idea" and stage.name == "idea_verification":
             query = f"{task.objective} 最近前例 反对证据 失败条件 实验范式"
-        query_pack = wiki_store.query_pack(query)
+        if task.command == "/idea":
+            query_pack = wiki_store.query_pack(
+                query,
+                limit=config.wiki_idea_query_paper_limit,
+                character_limit=config.wiki_idea_query_character_limit,
+            )
+            context_limit = config.wiki_idea_query_character_limit
+        else:
+            query_pack = wiki_store.query_pack(query)
+            context_limit = 9000
         query_pack_artifact = self._write_text(
             task,
             "wiki/query_pack.md",
@@ -1261,7 +1397,7 @@ class ResearchAgentService:
         )
         artifacts.append(query_pack_artifact)
 
-        context_parts = ["Research Wiki retrieval context:\n" + query_pack[:9000]]
+        context_parts = ["Research Wiki retrieval context:\n" + query_pack[:context_limit]]
         has_wiki_papers = bool(wiki_store.list_papers())
         if not has_wiki_papers:
             local_context = resolve_local_research_context(workspace_root, task.objective)
@@ -1286,14 +1422,21 @@ class ResearchAgentService:
                 system_prompt=(
                     "You create faithful Chinese research Wiki summaries from page-linked evidence. "
                     "Never invent facts, citations, datasets, results, limitations, or future work. "
-                    "Clearly mark model inference and uncertainty. Return markdown without a level-one title."
+                    "Clearly mark model inference and uncertainty, and distinguish author-explicit statements from inference. "
+                    "If Discussion, limitations, or future work are not supported by the evidence, write 未发现 or 未确认. "
+                    "Return markdown without a level-one title."
                 ),
                 user_prompt=(
                     f"Paper ID: {paper.paper_id}\n"
                     f"Source PDF: {paper.source_relative_path}\n\n"
                     "Use exactly these sections: 研究问题, 核心方法, 数据集与实验设置, 主要结果, "
-                    "作者讨论与局限, 作者提出的未来工作, 可复用证据, 与其他论文的关系, "
-                    "对 Idea 生成的提示. Every factual point should cite an available Evidence ID and page. "
+                    "作者讨论与局限, 作者提出的未来工作, 作者明确指出的 Gap, 基于证据推断的 Gap, "
+                    "可复用证据, 与其他论文的关系, 对 Idea 生成的提示, 证据边界与未确认内容. "
+                    "Every factual point should cite an available Evidence ID and page. "
+                    "作者明确指出的 Gap 只能记录论文作者明确提出的空白，并标注页码。"
+                    "基于证据推断的 Gap 必须明确写为推断，并列出支撑它的 Evidence ID。"
+                    "作者提出的未来工作必须保留为作者的直接未来方向，不能包装成本项目创新。"
+                    "证据边界与未确认内容必须列出论文不能支持的结论。"
                     "If the evidence does not support a section, write 未确认.\n\n"
                     f"Evidence:\n{evidence_context}"
                 ),
@@ -2771,6 +2914,109 @@ class ResearchAgentService:
             "unpaged_ids": unpaged_ids,
         }
 
+    def _apply_idea_novelty_gate(self, task: TaskRun, content: str) -> tuple[str, dict]:
+        wiki_store = ResearchWikiStore(task.artifact_root)
+        coverage = wiki_store.coverage_report()
+        reasons: list[str] = []
+        minimum = int(coverage["minimum_papers"])
+        full_text_count = int(coverage["full_text_papers"])
+        if full_text_count < minimum:
+            reasons.append(
+                f"完整可读论文只有 {full_text_count} 篇，低于顶刊候选最低要求 {minimum} 篇。"
+            )
+
+        candidate_text = self._read_task_artifact(task, "idea/IDEA_CANDIDATES.md")
+        verification_text = self._read_task_artifact(task, "idea/IDEA_VERIFICATION.md")
+        combined_text = "\n".join((candidate_text, verification_text, content))
+        reasons.extend(self._idea_novelty_risk_reasons(combined_text))
+        if len(set(re.findall(r"\bP-[A-F0-9]{12}\b", content, re.I))) < 2:
+            reasons.append("最终文档没有明确使用至少两篇完整论文的 Paper ID 形成跨论文差异。")
+        if not re.search(r"(?:可证伪|失败判据|falsif|失败标准)", content, re.I):
+            reasons.append("最终文档没有明确的可证伪实验或失败判据。")
+
+        blocked = bool(reasons)
+        gate = {
+            "status": "blocked_preliminary" if blocked else "pass",
+            "minimum_papers": minimum,
+            "full_text_papers": full_text_count,
+            "full_text_paper_ids": coverage["full_text_paper_ids"],
+            "reasons": reasons,
+        }
+        if not blocked:
+            return content, gate
+        missing = max(0, minimum - full_text_count)
+        block = [
+            "## 创新性判定",
+            "",
+            "- status: `blocked_preliminary`",
+            "- 结论: 当前内容只能作为实验起点，不能包装为已经成立的顶刊新论文 Idea。",
+            f"- 完整可读论文: {full_text_count}/{minimum}（还缺 {missing} 篇完整论文）。",
+            "- 是否只是作者 Future Work 或已有工作的直接延伸: 待进一步排除。",
+            "- 当前证据覆盖: " + (", ".join(f"`{item}`" for item in coverage["full_text_paper_ids"]) or "暂无") + "。",
+            "- 尚未解决的证据缺口: 需要补充完整论文、跨论文差异比较和直接重复检查。",
+            "- 是否建议进入真实实验: 仅建议作为复现或预实验，不建议作为最终论文主张。",
+            "",
+            "### 拦截原因",
+            "",
+            *[f"- {reason}" for reason in reasons],
+            "",
+            "### 下一步补充文献方向",
+            "",
+            "- 补充至少达到门槛的完整论文，并为每篇建立 Evidence ID。",
+            "- 对照作者 Future Work 和最近邻方法，明确当前候选新增的研究问题。",
+            "- 重新运行候选生成和批评阶段后，再决定是否进入正式实验。",
+        ]
+        if re.search(r"(?mi)^##\s*创新性判定\s*$", content):
+            content = re.sub(
+                r"(?ms)^##\s*创新性判定\s*\n.*?(?=^##\s|\Z)",
+                "\n".join(block) + "\n\n",
+                content,
+                count=1,
+            )
+        else:
+            block_text = "\n".join(block)
+            conclusion = re.search(r"(?mi)^##\s*8\.\s*结论与下一步\s*$", content)
+            if conclusion:
+                content = content[: conclusion.start()].rstrip() + "\n\n" + block_text + "\n\n" + content[conclusion.start() :]
+            else:
+                content = content.rstrip() + "\n\n" + block_text + "\n"
+        return content, gate
+
+    @staticmethod
+    def _idea_novelty_risk_reasons(text: str) -> list[str]:
+        reasons: list[str] = []
+        for line in text.splitlines():
+            normalized = line.casefold()
+            positive_status = re.search(
+                r"(?:\||:|：)\s*(?:是|yes|true|direct_extension|直接延伸|直接复述|已经实现|已实现)\b",
+                line,
+                re.I,
+            )
+            if positive_status and any(
+                marker in normalized
+                for marker in ("future work", "未来工作", "直接延伸", "直接复述", "direct_extension")
+            ):
+                reasons.append("候选或批评结果显示它可能只是作者 Future Work 的直接延伸。")
+            if positive_status and any(
+                marker in normalized
+                for marker in ("已有论文", "已有方法", "是否已经实现", "是否已有论文完成", "重复风险")
+            ):
+                reasons.append("候选或批评结果显示已有论文可能已经实现相同方法。")
+            if "证据不足" in normalized and not re.search(
+                r"(?:不存在|不是|并非|已经解决|已解决|已补足|否).{0,8}证据不足|证据不足.{0,8}(?:不存在|不是|并非|已经解决|已解决|已补足|否)",
+                line,
+                re.I,
+            ):
+                reasons.append("候选或批评结果仍明确标记为证据不足。")
+        return list(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _read_task_artifact(task: TaskRun, relative_path: str) -> str:
+        path = Path(task.artifact_root) / relative_path
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")
+
     @staticmethod
     def _normalize_generated_markdown(content: str, required_sections: list[str]) -> str:
         normalized = content.strip()
@@ -2886,7 +3132,7 @@ class ResearchAgentService:
             stage_budgets = {
                 "idea_candidates": "3,500",
                 "idea_verification": "2,500",
-                "final_idea": "4,800",
+                "final_idea": "6,500",
             }
             budget = stage_budgets.get(stage.name, "2,600")
             artifact_budget_hint = (
@@ -2897,21 +3143,57 @@ class ResearchAgentService:
                 "Every factual or numeric claim must cite an Evidence ID with page, or be labeled 未确认. "
                 "Do not assign symbols, formulas, datasets, or parameter meanings that are absent from the evidence.\n\n"
             )
+        idea_quality_hint = ""
+        if task.command == "/idea" and stage.name == "idea_candidates":
+            idea_quality_hint = (
+                "Top-journal candidate gate: read the Cross-Paper Evidence Matrix and Evidence Coverage before proposing ideas. "
+                "Generate exactly three candidate types: 直接复现型, 跨论文组合型, 机制或问题型. "
+                "A direct replication of author Future Work is useful only as an experiment starting point and cannot be called a new-paper contribution. "
+                "For every candidate include: 候选类型, 依赖的论文, Evidence IDs, 作者是否已经提出过, 已有论文是否已经实现, "
+                "与最接近工作的差异, 新增研究问题, 预期实验, 最大创新风险, and novelty_status. "
+                "Mark a candidate as novelty_status: direct_extension when it restates author Future Work, an existing method, a simple method-name combination, "
+                "a dataset-only change, or a hyperparameter-only change. Do not recommend a direct_extension as a top-journal candidate. "
+                "If Evidence Coverage has fewer than 5 complete readable papers, state that the evidence is insufficient for a top-journal candidate and do not overclaim novelty.\n\n"
+            )
+        elif task.command == "/idea" and stage.name == "idea_verification":
+            idea_quality_hint = (
+                "Novelty stress-test table is mandatory. Check: Gap 是否来自作者原文, 是否只是作者 Future Work, 是否已有论文完成, "
+                "是否至少由两篇论文支持, 方法差异是否具体, 是否能设计对照实验, 是否有可证伪失败标准, 最大重复风险, 最大证据风险. "
+                "A verdict of 保留 is forbidden when direct Future Work, existing implementation, insufficient coverage, or unsupported novelty remains unresolved. "
+                "Use only supplied Paper IDs and Evidence IDs; distinguish unavailable metadata from full-text evidence.\n\n"
+            )
+        elif task.command == "/idea" and stage.name == "final_idea":
+            idea_quality_hint = (
+                "Before calling this a top-journal candidate, enforce all gates: at least 5 complete readable papers including the main paper, "
+                "a cross-paper difference not equal to author Future Work, at least one falsifiable experiment, and Evidence IDs for key claims. "
+                "If any gate fails, keep the same FINAL_IDEA.md path but set status: blocked_preliminary and explain coverage, blocking reasons, "
+                "missing literature, and why the current result is only an experiment starting point. Never use 首次, 完全解决, SOTA, or 顶刊级创新 without direct evidence. "
+                "Include a section titled 创新性判定 with current status, Future Work overlap, closest prior work, concrete difference, coverage, unresolved gaps, and whether real experiments are recommended. "
+                "In every experiment block label: 论文已有设置, 本项目沿用设置, 本项目新增设置, 新增设置的文献依据, 尚未验证的假设, 失败判据.\n\n"
+            )
         final_idea_writing_hint = ""
         if task.command == "/idea" and stage.name == "final_idea":
             final_idea_writing_hint = (
                 "Final Idea reader profile: the document will be read by strong graduate and doctoral researchers who need "
-                "to understand the idea quickly and judge whether it is worth developing. Write professionally but do not use "
-                "dense slogan-like phrases. Use the exact Chinese headings below. Start each section with a direct conclusion, "
-                "then explain the reasoning in plain academic Chinese. The first section must contain a one-sentence Idea and "
-                "a short plain-language explanation. The gap section must say whether the gap is author-explicit or an "
-                "evidence-backed inference. The method section must explain the mechanism, why it may work, and which parts are "
-                "still assumptions. The innovation section must keep one dominant contribution and avoid a shopping list. The "
-                "evidence section should map key claims to Evidence IDs and page numbers. The risk section must include the "
-                "strongest plausible rejection argument and the condition under which the idea should be abandoned. Use short "
-                "paragraphs, bullets, or a small table only when they improve readability. Do not repeat the Wiki summary or "
-                "write a full experiment plan. Use only the nine required Chinese sections after the title. Do not mention "
-                "skills, prompts, agents, execution metadata, or add a separate plain-language summary after the last section.\n\n"
+                "to understand the idea quickly and judge whether it is worth developing. Organize it like a short research "
+                "paper, not like a brainstorm list: abstract, introduction, related work, research question, method, experiment "
+                "plan, expected contribution, limitations, conclusion, and references. Use the exact headings below. Start each "
+                "section with a direct conclusion, then explain the reasoning in plain academic Chinese. The abstract must give "
+                "the problem, proposed idea, evidence boundary, and validation target. The introduction must explain why the "
+                "problem matters. The related-work section must compare only supplied Wiki evidence and state when coverage is "
+                "limited. The research-question section must distinguish author-explicit gaps from evidence-backed inference. The "
+                "method section must explain the minimal mechanism, why it may work, and which parts remain assumptions. The "
+                "experiment section must be a concise paper-style plan with concrete datasets, baseline models, metrics, steps, "
+                "ablation groups, and failure criteria when supplied by the Wiki or the experiment handoff. Organize it into a few "
+                "numbered Markdown subheadings such as `### 5.1`, `### 5.2`; every block must explicitly state 目的、数据集、对照组、评价指标、步骤和输出. Include "
+                "capacity-matched or equivalent controls when needed to separate the target mechanism from added complexity. Use "
+                "高节点度节点, not 高阶节点, when referring to node degree. Label proposed or unconfirmed settings instead of "
+                "inventing them. The contribution section must keep one dominant contribution and "
+                "include falsifiable predictions. The limitations section must include the strongest rejection argument and an "
+                "abandon-or-revise condition. The conclusion must state what is supported now and what remains to be tested. Map "
+                "key claims to Evidence IDs and page numbers. Include the 创新性判定 section before the conclusion. Use only the required sections after the title. Do not mention "
+                "skills, prompts, agents, execution metadata, or add a separate plain-language summary. Required heading layout includes exactly `## 5. 实验方案` and `## 创新性判定`. "
+                "\n\n"
             )
         user_prompt = (
             f"Workflow: {workflow.title}\n"
@@ -2930,6 +3212,7 @@ class ResearchAgentService:
             + checkpoint_hint
             + language_hint
             + artifact_budget_hint
+            + idea_quality_hint
             + final_idea_writing_hint
             + f"Stage instruction:\n{stage.instruction}\n\n"
             + "Required sections:\n"
@@ -2945,6 +3228,11 @@ class ResearchAgentService:
             specification_context = (
                 f"PRD excerpt:\n{prd_context}\n\n"
                 f"Tech spec excerpt:\n{tech_context}\n\n"
+            )
+        system_idea_hint = ""
+        if task.command == "/idea" and stage.name == "final_idea":
+            system_idea_hint = (
+                " Final Idea artifacts must retain the exact paper-style heading `## 5. 实验方案` and include `## 创新性判定` before the conclusion."
             )
         system_prompt = (
             "You are the orchestration core of a research agent platform. "
@@ -2964,6 +3252,7 @@ class ResearchAgentService:
             + f"{CLOUD_DELIVERY_SYSTEM_POLICY}\n\n"
             + specification_context
             + f"Relevant ARIS guidance:\n{skill_context}\n"
+            + system_idea_hint
         )
         return {"system": system_prompt, "user": user_prompt}
 
