@@ -110,6 +110,13 @@ Use this decision tree for data-driven figures (inspired by Imbad0202/academic-r
 | Multi-dataset results | Multi-panel (subfigure) | 0.95\textwidth |
 | Prior work comparison | LaTeX table | — |
 
+Before selecting a chart, freeze the explicit source chosen by `FigureSourceConfig`.
+Do not let an unrelated table elsewhere in the workspace override the user's requested
+figure type. Treat `*_std`, `*_sem`, `*_error`, and confidence-interval columns as
+uncertainty for the matching metric rather than as additional plotted series. Prefer
+small multiples over an overloaded grouped chart when several metrics need independent
+scales.
+
 ### Step 4: Generate Each Figure
 
 For each figure in the plan, create a standalone Python script:

@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "assets": [
+    {
+      "name": "Tabler Icons local cache",
+      "categories": ["user", "cpu", "database", "file", "shield", "bolt", "world", "flask", "circle-check"],
+      "source": "https://github.com/tabler/tabler-icons",
+      "license": "MIT"
+    },
+    {
+      "name": "Fluent Emoji Flat",
+      "categories": [],
+      "source": "https://github.com/microsoft/fluentui-emoji",
+      "license": "MIT",
+      "note": "Allowed collection; no Fluent assets are cached until first explicit selection."
+    },
+    {
+      "name": "fallback vector primitives",
+      "categories": ["generic"],
+      "source": "project-authored",
+      "license": "project-authored"
+    }
+  ]
+}

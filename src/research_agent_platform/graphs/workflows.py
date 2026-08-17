@@ -291,59 +291,85 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
         "/fig": WorkflowDefinition(
             command="/fig",
             title="Figure Generation Workflow",
-            description="Generate a finished research figure from explicit data or with gpt-image-2.",
+            description="Generate one evidence-grounded research figure with a canonical editable source.",
             stage_definitions=[
                 StageDefinition(
-                    name="figure_inventory",
-                    title="Figure Inventory",
+                    name="figure_contract",
+                    title="Figure Contract",
                     instruction=(
-                        "Identify the single highest-value final figure and its evidence dependencies. Inspect the supplied "
-                        "workspace context. If explicit tabular data is available, require a precise code-rendered chart; "
-                        "otherwise specify a scientific illustration suitable for gpt-image-2."
+                        "Freeze the figure purpose, scientific claim, entities, directed relations, label allowlist, evidence "
+                        "sources, target format, and exactly one route: data plot, framework diagram, mechanism diagram, or "
+                        "reference reproduction. Data availability alone must never override explicit diagram intent."
                     ),
-                    artifact_path="figures/FIGURE_INVENTORY.md",
-                    artifact_kind="report",
+                    artifact_path="figures/FIGURE_CONTRACT.json",
+                    artifact_kind="contract",
                     required_sections=[
-                        "Required Figures",
-                        "Data Dependencies",
-                        "Narrative Purpose",
-                        "Priority Order",
-                        "Render Mode",
+                        "Figure Kind",
+                        "Evidence Sources",
+                        "Entities and Relations",
+                        "Label Allowlist",
+                        "Renderer",
                     ],
-                    skill_paths=_skills(
-                        "paper-figure",
-                        "figure-spec",
-                        "figure-description",
-                        "mermaid-diagram",
-                        "paper-illustration-image2",
-                    ),
+                    skill_paths=_skills("figure-orchestrator"),
+                    hitl=True,
+                    checkpoint_title="Confirm Figure Contract",
                 ),
                 StageDefinition(
-                    name="figure_briefs",
-                    title="Figure Briefs",
+                    name="figure_design",
+                    title="Figure Design",
                     instruction=(
-                        "Write a production brief for the selected final figure. Declare exactly one render mode: `code` "
-                        "for explicit numeric data or `image2` for a scientific illustration. For code mode name the "
-                        "source file, columns, chart type, axes, units, and caption. For image2 mode define composition, "
-                        "labels, visual hierarchy, and scientific constraints."
+                        "Convert the approved FigureContract into one VisualStyleSpec and a renderer-neutral LayoutPlan. "
+                        "Framework and mechanism affect templates and icon density, not the backend. Keep all structural "
+                        "text, nodes, panels, and arrows editable."
                     ),
-                    artifact_path="figures/FIGURE_BRIEFS.md",
+                    artifact_path="figures/VISUAL_STYLE_SPEC.json",
                     artifact_kind="plan",
                     required_sections=[
-                        "Per-Figure Brief",
-                        "Data Fields",
-                        "Design Notes",
-                        "Caption Drafts",
-                        "Render Mode",
+                        "Preset",
+                        "Palette",
+                        "Typography",
+                        "Icons and Hatching",
+                        "Arrows and Panels",
                     ],
-                    skill_paths=_skills(
-                        "paper-figure",
-                        "figure-spec",
-                        "figure-description",
-                        "paper-illustration",
-                        "paper-illustration-image2",
-                        "render-html",
+                    skill_paths=_skills("figure-orchestrator"),
+                ),
+                StageDefinition(
+                    name="figure_render_and_qa",
+                    title="Figure Render and QA",
+                    instruction=(
+                        "Measure text using the resolved font, run ELK with deterministic fallback, create one shared "
+                        "DiagramRenderSpec, invoke exactly one selected renderer, and run semantic, geometry, typography, "
+                        "contrast, connector, and provenance checks. Image generation is opt-in only."
                     ),
+                    artifact_path="figures/generated/FIGURE_QA.json",
+                    artifact_kind="manifest",
+                    required_sections=[
+                        "Hard Status",
+                        "Semantic Checks",
+                        "Geometry Checks",
+                        "Warnings",
+                        "Publication Status",
+                    ],
+                    skill_paths=_skills("figure-orchestrator"),
+                ),
+                StageDefinition(
+                    name="figure_delivery",
+                    title="Figure Delivery",
+                    instruction=(
+                        "Deliver PNG, SVG, PDF, the authoritative editable source, QA report, and FigureDeliveryManifest v3. "
+                        "Declare the canonical source and keep publication status at needs_human_visual_review until a person "
+                        "has inspected the final-size preview."
+                    ),
+                    artifact_path="figures/generated/FIGURE_DELIVERY.json",
+                    artifact_kind="manifest",
+                    required_sections=[
+                        "Renderer and Route",
+                        "Inputs",
+                        "Canonical Source",
+                        "Derived Outputs",
+                        "QA and Warnings",
+                    ],
+                    skill_paths=_skills("figure-orchestrator"),
                 ),
             ],
         ),
