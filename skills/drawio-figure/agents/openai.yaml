@@ -1,0 +1,4 @@
+interface:
+  display_name: "Draw.io Research Figure"
+  short_description: "Build rich editable mechanism diagrams as Draw.io and SVG"
+  default_prompt: "Use $drawio-figure to build an editable research mechanism diagram."

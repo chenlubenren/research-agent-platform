@@ -1,0 +1,3 @@
+interface:
+  display_name: "Academic SVG"
+  short_description: "Editable publication-vector renderer for DiagramRenderSpec"

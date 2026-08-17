@@ -1,0 +1,10 @@
+{
+  "name": "research-agent-platform-figure-layout",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "elkjs": "0.11.1"
+  }
+}

@@ -41,7 +41,7 @@ COMMAND_DESCRIPTIONS = {
     "/idea": "generate, challenge, verify, and select research ideas",
     "/plan": "turn a selected idea or objective into experiments and an execution plan",
     "/code": "turn the chosen plan into implementation and experiment execution materials",
-    "/fig": "generate precise research charts from data or scientific illustrations with gpt-image-2",
+    "/fig": "generate one evidence-grounded research figure with editable Python, Academic SVG, or Draw.io source",
     "/write": "create paper outlines, narrative reports, and draft sections",
     "/rebuttal": "analyze peer-review comments and produce rebuttal and revision materials",
     "/present": "prepare slides, poster, talk track, and Q&A materials",

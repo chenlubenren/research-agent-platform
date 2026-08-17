@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,10 @@ class CodeFigureResult:
     row_count: int
     png_bytes: bytes
     svg_bytes: bytes
+    pdf_bytes: bytes
+    source_code: str
+    objective: str = ""
+    error_columns: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -75,21 +80,26 @@ def render_code_figure(
     upload_batches: Iterable[UploadBatchRecord] = (),
     *,
     objective: str = "",
+    explicit_source_refs: Iterable[str] = (),
 ) -> CodeFigureResult:
     warnings: list[str] = []
-    for source_ref in select_data_sources(workspace_root, upload_batches):
+    for source_ref in select_data_sources(
+        workspace_root,
+        upload_batches,
+        explicit_source_refs=explicit_source_refs,
+    ):
         try:
             tables = read_tables(workspace_root / Path(source_ref), source_ref)
         except Exception as exc:
             warnings.append(f"{source_ref}: {exc.__class__.__name__}: {exc}")
             continue
         for table in tables:
-            chart = _select_chart(table)
+            chart = _select_chart(table, objective=objective)
             if chart is None:
                 warnings.append(f"{source_ref}: no sufficiently populated numeric column")
                 continue
             chart_type, x_index, y_indices, plotted_rows = chart
-            png_bytes, svg_bytes = _render_chart(
+            png_bytes, svg_bytes, pdf_bytes = _render_chart(
                 table,
                 chart_type=chart_type,
                 x_index=x_index,
@@ -106,6 +116,14 @@ def render_code_figure(
                 row_count=len(plotted_rows),
                 png_bytes=png_bytes,
                 svg_bytes=svg_bytes,
+                pdf_bytes=pdf_bytes,
+                source_code=_reproduction_script(source_ref, objective),
+                objective=objective,
+                error_columns=[
+                    table.headers[error_index]
+                    for value_index in y_indices
+                    if (error_index := _matching_error_index(table, value_index)) is not None
+                ],
                 warnings=warnings,
             )
     raise NoRenderableDataError(warnings)
@@ -114,6 +132,8 @@ def render_code_figure(
 def select_data_sources(
     workspace_root: Path,
     upload_batches: Iterable[UploadBatchRecord] = (),
+    *,
+    explicit_source_refs: Iterable[str] = (),
 ) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
@@ -121,8 +141,13 @@ def select_data_sources(
     def add(relative_path: str) -> None:
         normalized = relative_path.replace("\\", "/").lstrip("/")
         source = workspace_root / Path(normalized)
+        try:
+            inside_workspace = source.resolve().is_relative_to(workspace_root.resolve())
+        except OSError:
+            inside_workspace = False
         if (
             normalized not in seen
+            and inside_workspace
             and source.is_file()
             and source.suffix.lower() in DATA_EXTENSIONS
             and "generated" not in {part.lower() for part in source.parts}
@@ -130,6 +155,8 @@ def select_data_sources(
             selected.append(normalized)
             seen.add(normalized)
 
+    for relative_path in explicit_source_refs:
+        add(relative_path)
     batches = list(upload_batches)
     if batches:
         for relative_path in batches[-1].relative_paths:
@@ -211,6 +238,8 @@ def _table_from_records(
 
 def _select_chart(
     table: TableData,
+    *,
+    objective: str = "",
 ) -> tuple[str, int | None, list[int], list[list[object]]] | None:
     numeric_columns: list[int] = []
     for column_index in range(len(table.headers)):
@@ -220,20 +249,62 @@ def _select_chart(
             numeric_columns.append(column_index)
     if not numeric_columns:
         return None
+    metric_columns = [
+        index for index in numeric_columns if not _is_error_header(table.headers[index])
+    ] or numeric_columns
+
+    normalized_objective = objective.lower()
+    if any(term in normalized_objective for term in ("heatmap", "热力图", "matrix", "矩阵")):
+        y_indices = metric_columns[:10]
+        rows = [
+            row
+            for row in table.rows
+            if all(_to_number(row[column_index]) is not None for column_index in y_indices)
+        ]
+        if len(rows) >= 2 and len(y_indices) >= 2:
+            return "heatmap", None, y_indices, rows[:40]
+    if any(term in normalized_objective for term in ("violin", "小提琴")):
+        y_indices = metric_columns[:8]
+        rows = [
+            row
+            for row in table.rows
+            if all(_to_number(row[column_index]) is not None for column_index in y_indices)
+        ]
+        if len(rows) >= 2:
+            return "violin", None, y_indices, rows
+    if any(term in normalized_objective for term in ("boxplot", "box plot", "箱线")):
+        y_indices = metric_columns[:8]
+        rows = [
+            row
+            for row in table.rows
+            if all(_to_number(row[column_index]) is not None for column_index in y_indices)
+        ]
+        if len(rows) >= 2:
+            return "box", None, y_indices, rows
 
     non_numeric_columns = [
         index for index in range(len(table.headers)) if index not in numeric_columns
     ]
+    if (
+        any(term in normalized_objective for term in ("multi-panel", "small multiple", "多面板", "多子图", "小多图"))
+        and non_numeric_columns
+        and len(metric_columns) >= 2
+    ):
+        x_index = non_numeric_columns[0]
+        y_indices = metric_columns[:6]
+        rows = _complete_rows(table.rows, x_index, y_indices)
+        if len(rows) >= 2:
+            return "small_multiples", x_index, y_indices, rows[:30]
     time_column = next(
         (
             index
             for index in range(len(table.headers))
-            if _is_time_header(table.headers[index]) and index != numeric_columns[-1]
+            if _is_time_header(table.headers[index]) and index != metric_columns[-1]
         ),
         None,
     )
     if time_column is not None:
-        y_indices = [index for index in numeric_columns if index != time_column][:4]
+        y_indices = [index for index in metric_columns if index != time_column][:4]
         if y_indices:
             rows = _complete_rows(table.rows, time_column, y_indices)
             if len(rows) >= 2:
@@ -241,18 +312,18 @@ def _select_chart(
 
     if non_numeric_columns:
         x_index = non_numeric_columns[0]
-        y_indices = numeric_columns[:4]
+        y_indices = metric_columns[:4]
         rows = _complete_rows(table.rows, x_index, y_indices)
         if len(rows) >= 2:
             return "bar", x_index, y_indices, rows[:30]
 
-    if len(numeric_columns) >= 2:
-        x_index, y_index = numeric_columns[:2]
+    if len(metric_columns) >= 2:
+        x_index, y_index = metric_columns[:2]
         rows = _complete_rows(table.rows, x_index, [y_index])
         if len(rows) >= 2:
             return "scatter", x_index, [y_index], rows
 
-    y_index = numeric_columns[0]
+    y_index = metric_columns[0]
     rows = [row for row in table.rows if _to_number(row[y_index]) is not None]
     if len(rows) >= 2:
         return "line", None, [y_index], rows
@@ -267,7 +338,7 @@ def _render_chart(
     y_indices: list[int],
     plotted_rows: list[list[object]],
     objective: str,
-) -> tuple[bytes, bytes]:
+) -> tuple[bytes, bytes, bytes]:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -276,8 +347,17 @@ def _render_chart(
     plt.rcParams.update(
         {
             "font.family": "sans-serif",
-            "font.sans-serif": ["Microsoft YaHei", "SimHei", "DejaVu Sans"],
+            "font.sans-serif": [
+                "PingFang SC",
+                "Noto Sans CJK SC",
+                "Source Han Sans SC",
+                "Microsoft YaHei",
+                "SimHei",
+                "DejaVu Sans",
+            ],
             "axes.unicode_minus": False,
+            "svg.fonttype": "none",
+            "pdf.fonttype": 42,
             "axes.edgecolor": "#B8BEC6",
             "axes.labelcolor": "#2F343B",
             "text.color": "#20242A",
@@ -287,6 +367,54 @@ def _render_chart(
     figure.patch.set_facecolor("white")
     axis.set_facecolor("white")
     colors = ["#2463A7", "#D4553D", "#2D8A63", "#8A6BBE"]
+
+    if chart_type == "small_multiples":
+        if x_index is None:
+            raise ValueError("small_multiples requires a categorical x column")
+        plt.close(figure)
+        columns = min(2, len(y_indices))
+        rows_count = math.ceil(len(y_indices) / columns)
+        figure, axes = plt.subplots(rows_count, columns, figsize=(12, 4.4 * rows_count), dpi=160)
+        axes_list = list(axes.flat) if hasattr(axes, "flat") else [axes]
+        x_values = [_clean_cell(row[x_index]) for row in plotted_rows]
+        positions = list(range(len(plotted_rows)))
+        for axis_index, column_index in enumerate(y_indices):
+            panel_axis = axes_list[axis_index]
+            values = [_to_number(row[column_index]) for row in plotted_rows]
+            error_index = _matching_error_index(table, column_index)
+            errors = (
+                [_to_number(row[error_index]) for row in plotted_rows]
+                if error_index is not None
+                else None
+            )
+            panel_axis.bar(
+                positions,
+                values,
+                color=colors[axis_index % len(colors)],
+                yerr=errors,
+                capsize=4 if errors else 0,
+            )
+            panel_axis.set_ylabel(table.headers[column_index])
+            panel_axis.set_xticks(
+                positions,
+                x_values,
+                rotation=35 if len(positions) > 8 else 0,
+                ha="right" if len(positions) > 8 else "center",
+            )
+            panel_axis.grid(axis="y", color="#E4E7EB", linewidth=0.8)
+            panel_axis.spines[["top", "right"]].set_visible(False)
+        for unused_axis in axes_list[len(y_indices) :]:
+            unused_axis.set_visible(False)
+        figure.text(0.01, 0.01, f"Source: {table.source_ref}", fontsize=8, color="#6B737C")
+        figure.tight_layout(rect=(0, 0.035, 1, 1))
+        png_buffer = io.BytesIO()
+        svg_buffer = io.BytesIO()
+        pdf_buffer = io.BytesIO()
+        figure.savefig(png_buffer, format="png", bbox_inches="tight", facecolor="white")
+        figure.savefig(svg_buffer, format="svg", bbox_inches="tight", facecolor="white")
+        figure.savefig(pdf_buffer, format="pdf", bbox_inches="tight", facecolor="white")
+        plt.close(figure)
+        return png_buffer.getvalue(), svg_buffer.getvalue(), pdf_buffer.getvalue()
 
     if x_index is None:
         x_values = list(range(1, len(plotted_rows) + 1))
@@ -298,18 +426,47 @@ def _render_chart(
         x_values = [_clean_cell(row[x_index]) for row in plotted_rows]
         x_label = table.headers[x_index]
 
-    if chart_type == "bar":
+    if chart_type == "heatmap":
+        matrix = [[_to_number(row[index]) for index in y_indices] for row in plotted_rows]
+        image = axis.imshow(matrix, aspect="auto", cmap="Blues")
+        axis.set_xticks(range(len(y_indices)), [table.headers[index] for index in y_indices], rotation=35, ha="right")
+        axis.set_yticks(range(len(plotted_rows)), [str(index + 1) for index in range(len(plotted_rows))])
+        axis.set_ylabel("Row")
+        figure.colorbar(image, ax=axis, fraction=0.04, pad=0.03)
+    elif chart_type in {"box", "violin"}:
+        series = [[_to_number(row[index]) for row in plotted_rows] for index in y_indices]
+        labels = [table.headers[index] for index in y_indices]
+        if chart_type == "violin":
+            parts = axis.violinplot(series, showmeans=True, showextrema=True)
+            for body in parts["bodies"]:
+                body.set_facecolor(colors[0])
+                body.set_alpha(0.7)
+            axis.set_xticks(range(1, len(labels) + 1), labels, rotation=25 if len(labels) > 4 else 0)
+        else:
+            box = axis.boxplot(series, tick_labels=labels, patch_artist=True)
+            for index, patch in enumerate(box["boxes"]):
+                patch.set_facecolor(colors[index % len(colors)])
+                patch.set_alpha(0.72)
+    elif chart_type == "bar":
         positions = list(range(len(plotted_rows)))
         group_width = 0.78 / len(y_indices)
         for series_index, column_index in enumerate(y_indices):
             offset = (series_index - (len(y_indices) - 1) / 2) * group_width
             values = [_to_number(row[column_index]) for row in plotted_rows]
+            error_index = _matching_error_index(table, column_index)
+            errors = (
+                [_to_number(row[error_index]) for row in plotted_rows]
+                if error_index is not None
+                else None
+            )
             axis.bar(
                 [position + offset for position in positions],
                 values,
                 width=group_width * 0.9,
                 label=table.headers[column_index],
                 color=colors[series_index % len(colors)],
+                yerr=errors,
+                capsize=4 if errors else 0,
             )
         axis.set_xticks(positions, x_values, rotation=35 if len(positions) > 8 else 0, ha="right" if len(positions) > 8 else "center")
     elif chart_type == "scatter":
@@ -328,25 +485,40 @@ def _render_chart(
                 label=table.headers[column_index],
                 color=colors[series_index % len(colors)],
             )
+            error_index = _matching_error_index(table, column_index)
+            if error_index is not None:
+                errors = [_to_number(row[error_index]) or 0 for row in plotted_rows]
+                lower = [value - error for value, error in zip(y_values, errors)]
+                upper = [value + error for value, error in zip(y_values, errors)]
+                axis.fill_between(
+                    x_values,
+                    lower,
+                    upper,
+                    color=colors[series_index % len(colors)],
+                    alpha=0.16,
+                    linewidth=0,
+                )
 
-    title = _chart_title(objective, table.source_ref)
-    axis.set_title(title, loc="left", fontsize=18, fontweight="bold", pad=18)
-    axis.set_xlabel(x_label, fontsize=11, labelpad=10)
-    if len(y_indices) == 1:
+    if chart_type not in {"heatmap", "box", "violin"}:
+        axis.set_xlabel(x_label, fontsize=11, labelpad=10)
+    if len(y_indices) == 1 and chart_type not in {"heatmap", "box", "violin"}:
         axis.set_ylabel(table.headers[y_indices[0]], fontsize=11, labelpad=10)
-    axis.grid(axis="y", color="#E4E7EB", linewidth=0.8)
+    if chart_type != "heatmap":
+        axis.grid(axis="y", color="#E4E7EB", linewidth=0.8)
     axis.spines[["top", "right"]].set_visible(False)
-    if len(y_indices) > 1 or chart_type == "line":
+    if chart_type == "line" or (chart_type == "bar" and len(y_indices) > 1):
         axis.legend(frameon=False, loc="best")
     figure.text(0.01, 0.01, f"Source: {table.source_ref}", fontsize=8, color="#6B737C")
     figure.tight_layout(rect=(0, 0.035, 1, 1))
 
     png_buffer = io.BytesIO()
     svg_buffer = io.BytesIO()
+    pdf_buffer = io.BytesIO()
     figure.savefig(png_buffer, format="png", bbox_inches="tight", facecolor="white")
     figure.savefig(svg_buffer, format="svg", bbox_inches="tight", facecolor="white")
+    figure.savefig(pdf_buffer, format="pdf", bbox_inches="tight", facecolor="white")
     plt.close(figure)
-    return png_buffer.getvalue(), svg_buffer.getvalue()
+    return png_buffer.getvalue(), svg_buffer.getvalue(), pdf_buffer.getvalue()
 
 
 def _complete_rows(
@@ -387,8 +559,111 @@ def _is_time_header(header: str) -> bool:
     return any(term in normalized for term in TIME_TERMS)
 
 
+def _is_error_header(header: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "_", header.lower()).strip("_")
+    return bool(re.search(r"(?:^|_)(?:std|sd|sem|stderr|error|err|ci)(?:$|_)", normalized)) or any(
+        term in normalized for term in ("标准差", "标准误", "误差")
+    )
+
+
+def _matching_error_index(table: TableData, value_index: int) -> int | None:
+    value_name = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", table.headers[value_index].lower())
+    for index, header in enumerate(table.headers):
+        if index == value_index or not _is_error_header(header):
+            continue
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", header.lower())
+        if value_name and value_name in normalized:
+            return index
+    error_indices = [index for index, header in enumerate(table.headers) if _is_error_header(header)]
+    return error_indices[0] if len(error_indices) == 1 else None
+
+
 def _chart_title(objective: str, source_ref: str) -> str:
     cleaned = re.sub(r"^/(?:fig|figure)\s*", "", objective.strip(), flags=re.I)
     if cleaned and len(cleaned) <= 72:
         return cleaned
     return Path(source_ref).stem.replace("_", " ").strip().title() or "Research Result"
+
+
+def _reproduction_script(source_ref: str, objective: str) -> str:
+    return f'''from pathlib import Path
+
+from research_agent_platform.figure_pipeline import render_code_figure
+
+
+workspace = Path(__file__).resolve().parents[2]
+result = render_code_figure(
+    workspace,
+    objective={objective!r},
+    explicit_source_refs=[{source_ref!r}],
+)
+output = Path(__file__).resolve().parent
+(output / "FIGURE_01.png").write_bytes(result.png_bytes)
+(output / "FIGURE_01.svg").write_bytes(result.svg_bytes)
+(output / "FIGURE_01.pdf").write_bytes(result.pdf_bytes)
+'''
+
+
+def validate_code_figure(result: CodeFigureResult) -> dict[str, object]:
+    errors: list[str] = []
+    warnings = list(result.warnings)
+    if not result.png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        errors.append("PNG output is invalid")
+    if b"<svg" not in result.svg_bytes[:500]:
+        errors.append("SVG output is invalid")
+    if not result.pdf_bytes.startswith(b"%PDF"):
+        errors.append("PDF output is invalid")
+    if result.source_ref not in result.source_code:
+        errors.append("reproduction script does not reference the frozen input")
+    if not result.y_columns:
+        errors.append("no plotted numeric columns")
+    error_requested = any(
+        term in result.objective.lower()
+        for term in ("error", "uncertainty", "confidence interval", "误差", "置信区间")
+    )
+    if error_requested and not result.error_columns:
+        errors.append("error or uncertainty expression was requested but no error column was found")
+    units_declared = all(_header_has_unit(column) for column in result.y_columns)
+    if not units_declared:
+        warnings.append("one or more plotted metrics have no explicit unit or dimensionless metric name")
+    return {
+        "schema_version": "1.0",
+        "hard_status": "pass" if not errors else "fail",
+        "errors": errors,
+        "warnings": warnings,
+        "checks": {
+            "frozen_source": result.source_ref in result.source_code,
+            "vector_svg": b"<svg" in result.svg_bytes[:500],
+            "vector_pdf": result.pdf_bytes.startswith(b"%PDF"),
+            "numeric_series": bool(result.y_columns),
+            "error_expression": not error_requested or bool(result.error_columns),
+            "units_declared_or_dimensionless": units_declared,
+            "data_source_annotated": result.source_ref.encode("utf-8") in result.svg_bytes,
+        },
+        "visual_review": "advisory_not_run",
+        "publication_status": "needs_human_visual_review",
+    }
+
+
+def _header_has_unit(header: str) -> bool:
+    normalized = header.lower()
+    if re.search(r"(?:\([^)]*\)|\[[^]]*\]|%|％)", header):
+        return True
+    return any(
+        term in normalized
+        for term in (
+            "accuracy",
+            "loss",
+            "score",
+            "precision",
+            "recall",
+            "f1",
+            "auc",
+            "correlation",
+            "准确率",
+            "精度",
+            "损失",
+            "得分",
+            "相关系数",
+        )
+    )

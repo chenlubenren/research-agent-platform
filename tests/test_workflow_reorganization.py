@@ -51,6 +51,12 @@ def test_reorganized_workflow_boundaries():
         "paper_self_review",
         "paper_revision",
     ]
+    assert [stage.name for stage in workflows["/fig"].stage_definitions] == [
+        "figure_contract",
+        "figure_design",
+        "figure_render_and_qa",
+        "figure_delivery",
+    ]
 
 
 def test_router_separates_literature_review_and_peer_review():
