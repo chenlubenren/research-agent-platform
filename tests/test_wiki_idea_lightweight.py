@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from pathlib import Path
 
 from reportlab.pdfgen import canvas
 
 from research_agent_platform import agent as agent_module
+from research_agent_platform import reference_expansion
 from research_agent_platform import upstream as upstream_module
 from research_agent_platform.agent import ResearchAgentService
 from research_agent_platform.config import config
@@ -17,6 +19,31 @@ def _write_test_pdf(path: Path, text: str = "Graph neural network limitation and
     path.parent.mkdir(parents=True, exist_ok=True)
     document = canvas.Canvas(str(path))
     document.drawString(72, 760, text)
+    document.save()
+
+
+def _reference_pdf_bytes(title: str) -> bytes:
+    buffer = io.BytesIO()
+    document = canvas.Canvas(buffer)
+    document.drawString(72, 760, title)
+    document.drawString(72, 742, "Discussion, experiment setup, limitation, and future work")
+    document.save()
+    return buffer.getvalue()
+
+
+def _write_main_pdf_with_references(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = canvas.Canvas(str(path))
+    lines = [
+        "Main graph research paper",
+        "References",
+        "Alpha, A. Reliable graph baselines. In ICLR, 2020.",
+        "Beta, B. Evidence grounded experiments. In NeurIPS, 2021.",
+    ]
+    y = 760
+    for line in lines:
+        document.drawString(72, y, line)
+        y -= 18
     document.save()
 
 
@@ -46,15 +73,16 @@ def _stage_markdown(user_prompt: str, *, invalid_reference: bool = False) -> str
         evidence = "[P001] and [P999]" if invalid_reference else "available Wiki evidence"
         return (
             "# 最终研究 Idea：示例方向\n\n"
-            "## 一句话研究 Idea\n- 用一个最小机制解决目标问题。\n\n"
-            "## 研究背景与核心问题\n- Topic.\n\n"
-            "## 现有研究不足与可切入空白\n- Gap.\n\n"
-            "## 核心假设与方法思路\n- A.\n\n"
-            "## 预期创新与学术价值\n- B.\n\n"
-            f"## 可证伪预测\n- C based on {evidence}.\n\n"
-            "## 证据依据\n- Current evidence.\n\n"
-            "## 适用边界、风险与不确定性\n- F.\n\n"
-            "## 交给实验方案模块的下一步\n- Ready."
+            "## 摘要\n- 用一个最小机制解决目标问题。\n\n"
+            "## 1. 引言\n- Topic.\n\n"
+            "## 2. 相关工作\n- Prior work.\n\n"
+            "## 3. 研究问题与核心假设\n- Gap and hypothesis.\n\n"
+            "## 4. 方法思路\n- A.\n\n"
+            "## 5. 实验方案\n- Datasets, baselines, metrics, steps, and ablations.\n\n"
+            f"## 6. 预期贡献与可证伪预测\n- C based on {evidence}.\n\n"
+            "## 7. 局限、风险与不确定性\n- F.\n\n"
+            "## 8. 结论与下一步\n- Ready.\n\n"
+            "## 参考文献与证据\n- Current evidence."
         )
     if "Using the template and the idea artifacts" in user_prompt:
         return "# Research Contract\n\n- Ready for /plan."
@@ -126,15 +154,30 @@ def test_idea_routes_each_stage_to_configured_model(
     assert "Locked critic verdict" in stage_user_prompts["Final Idea"]
     assert all("%PDF-" not in prompt for prompt in stage_user_prompts.values())
     assert "strong graduate and doctoral researchers" in stage_user_prompts["Final Idea"]
-    assert "## 一句话研究 Idea" not in stage_user_prompts["Final Idea"]
-    assert "- 一句话研究 Idea" in stage_user_prompts["Final Idea"]
-    assert "strongest plausible rejection argument" in stage_user_prompts["Final Idea"]
-    assert "交给实验方案模块的下一步" in stage_system_prompts_by_name["Final Idea"]
+    assert "## 摘要" not in stage_user_prompts["Final Idea"]
+    assert "- 摘要" in stage_user_prompts["Final Idea"]
+    assert "strongest rejection argument" in stage_user_prompts["Final Idea"]
+    assert "## 5. 实验方案" in stage_system_prompts_by_name["Final Idea"]
+    assert "目的、数据集、对照组、评价指标、步骤和输出" in stage_system_prompts_by_name["Final Idea"]
+    assert "### 5.1" in stage_system_prompts_by_name["Final Idea"]
+    assert "高节点度节点, not 高阶节点" in stage_system_prompts_by_name["Final Idea"]
     task = service.get_task(result["task_id"])
     final_idea = Path(task.artifact_root, "idea", "FINAL_IDEA.md").read_text(encoding="utf-8")
-    assert "## 一句话研究 Idea" in final_idea
-    assert "## 现有研究不足与可切入空白" in final_idea
-    assert "## 适用边界、风险与不确定性" in final_idea
+    expected_headings = [
+        "摘要",
+        "1. 引言",
+        "2. 相关工作",
+        "3. 研究问题与核心假设",
+        "4. 方法思路",
+        "5. 实验方案",
+            "6. 预期贡献与可证伪预测",
+            "7. 局限、风险与不确定性",
+            "创新性判定",
+            "8. 结论与下一步",
+        "参考文献与证据",
+    ]
+    assert [line.removeprefix("## ") for line in final_idea.splitlines() if line.startswith("## ")] == expected_headings
+    assert "## 一句话研究 Idea" not in final_idea
     assert "## Problem Anchor" not in final_idea
     trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
     assert [stage["model_role"] for stage in trace["stages"]] == [
@@ -276,6 +319,179 @@ def test_wiki_query_pack_prioritizes_gap_sections(tmp_path: Path):
     assert "作者讨论与局限" in query_pack
 
 
+def test_query_pack_reports_coverage_and_cross_paper_matrix(tmp_path: Path):
+    store = ResearchWikiStore(tmp_path)
+    source = tmp_path / "paper" / "main.pdf"
+    _write_test_pdf(source, "Main paper")
+    paper = store.paper_for_source("paper/main.pdf")
+    store.ensure_pdf_copy(paper)
+    store.write_summary(
+        paper,
+        "## 研究问题\n\n- 深层传播稳定性。[PE-AAAAAAAAAA, p.1]\n\n"
+        "## 核心方法\n\n- 初始残差。[PE-AAAAAAAAAA, p.2]\n\n"
+        "## 作者讨论与局限\n\n- 深度增加后性能退化。[PE-AAAAAAAAAA, p.3]\n\n"
+        "## 作者提出的未来工作\n\n- 未确认。\n\n"
+        "## 对 Idea 生成的提示\n\n- 需要验证。\n"
+    )
+
+    query_pack = store.query_pack("深层传播", character_limit=5000)
+    coverage = store.coverage_report()
+
+    assert coverage["full_text_papers"] == 1
+    assert coverage["ready_for_top_journal_candidate"] is False
+    assert "## Evidence Coverage" in query_pack
+    assert "## Cross-Paper Evidence Matrix" in query_pack
+    assert "P-" in query_pack
+    assert "PE-AAAAAAAAAA" in query_pack
+
+
+def test_metadata_only_references_do_not_count_as_full_text_evidence(tmp_path: Path):
+    wiki_root = Path(tmp_path, "wiki")
+    wiki_root.mkdir(parents=True)
+    Path(wiki_root, "reference_catalog.json").write_text(
+        json.dumps(
+            {
+                "records": [
+                    {"reference_id": "R001", "status": "unavailable", "title": "Metadata only"},
+                    {"reference_id": "R002", "status": "unresolved", "title": "Missing PDF"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    coverage = ResearchWikiStore(tmp_path).coverage_report()
+
+    assert coverage["full_text_papers"] == 0
+    assert coverage["metadata_only_references"] == 2
+    assert coverage["ready_for_top_journal_candidate"] is False
+
+
+def test_final_idea_is_blocked_when_full_text_coverage_is_insufficient(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    async def generate_candidate(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        return _stage_markdown(user_prompt) + "\n可证伪失败判据：性能不改善时停止。\n"
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_candidate)
+    session = service.store.create_session()
+    source_pdf = Path(session.workspace_root, "paper", "uploads", "single.pdf")
+    _write_test_pdf(source_pdf)
+
+    result = asyncio.run(service.chat(session.session_id, "/idea 生成一个 GNN 研究方向"))
+    task = service.get_task(result["task_id"])
+    final_idea = Path(task.artifact_root, "idea", "FINAL_IDEA.md").read_text(encoding="utf-8")
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+
+    assert "status: `blocked_preliminary`" in final_idea
+    assert "完整可读论文只有" in final_idea
+    assert trace["evidence_validation"]["novelty_gate"]["status"] == "blocked_preliminary"
+
+
+def test_final_idea_can_pass_coverage_gate_with_five_papers(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    async def generate_cross_paper(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        return (
+            _stage_markdown(user_prompt)
+            + "\n依赖论文：`P-AAAAAAAAAAAA`, `P-BBBBBBBBBBBB`。"
+            + "\n可证伪失败判据：若新增机制不改善分组结果则拒绝。\n"
+        )
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_cross_paper)
+    session = service.store.create_session()
+    for index in range(5):
+        relative = f"paper/uploads/paper-{index}.pdf"
+        source_pdf = Path(session.workspace_root, relative)
+        _write_test_pdf(source_pdf, f"Paper {index}")
+        store = ResearchWikiStore(session.workspace_root)
+        paper = store.paper_for_source(relative)
+        store.ensure_pdf_copy(paper)
+        store.write_summary(
+            paper,
+            "## 研究问题\n\n- 研究问题。[PE-AAAAAAAAAA, p.1]\n\n"
+            "## 核心方法\n\n- 方法机制。[PE-AAAAAAAAAA, p.2]\n\n"
+            "## 作者讨论与局限\n\n- 局限。[PE-AAAAAAAAAA, p.3]\n\n"
+            "## 作者提出的未来工作\n\n- 未确认。\n\n"
+            "## 对 Idea 生成的提示\n\n- 方向。\n"
+        )
+
+    result = asyncio.run(service.chat(session.session_id, "/idea 生成一个跨论文 GNN 研究方向"))
+    task = service.get_task(result["task_id"])
+    final_idea = Path(task.artifact_root, "idea", "FINAL_IDEA.md").read_text(encoding="utf-8")
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+
+    assert result["status"] == "completed"
+    assert "blocked_preliminary" not in final_idea
+    assert trace["evidence_validation"]["novelty_gate"]["status"] == "pass"
+
+
+def test_final_idea_blocks_direct_future_work_even_with_five_papers(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    async def generate_direct_extension(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        return (
+            _stage_markdown(user_prompt)
+            + "\n依赖论文：`P-AAAAAAAAAAAA`, `P-BBBBBBBBBBBB`。"
+            + "\n是否只是作者 Future Work：是。"
+            + "\n可证伪失败判据：若新增机制不改善分组结果则拒绝。\n"
+        )
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_direct_extension)
+    session = service.store.create_session()
+    for index in range(5):
+        relative = f"paper/uploads/future-work-{index}.pdf"
+        source_pdf = Path(session.workspace_root, relative)
+        _write_test_pdf(source_pdf, f"Future work paper {index}")
+        store = ResearchWikiStore(session.workspace_root)
+        paper = store.paper_for_source(relative)
+        store.ensure_pdf_copy(paper)
+        store.write_summary(paper, "## 研究问题\n\n- 问题。\n")
+
+    result = asyncio.run(service.chat(session.session_id, "/idea 检查直接 Future Work"))
+    task = service.get_task(result["task_id"])
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+
+    gate = trace["evidence_validation"]["novelty_gate"]
+    assert gate["status"] == "blocked_preliminary"
+    assert any("Future Work" in reason for reason in gate["reasons"])
+
+
+def test_final_idea_blocks_method_already_implemented_by_prior_work(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    async def generate_duplicate(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        return (
+            _stage_markdown(user_prompt)
+            + "\n依赖论文：`P-AAAAAAAAAAAA`, `P-BBBBBBBBBBBB`。"
+            + "\n已有论文是否已经实现：是。"
+            + "\n可证伪失败判据：若新增机制不改善分组结果则拒绝。\n"
+        )
+
+    monkeypatch.setattr(agent_module, "generate_text", generate_duplicate)
+    session = service.store.create_session()
+    for index in range(5):
+        relative = f"paper/uploads/duplicate-{index}.pdf"
+        source_pdf = Path(session.workspace_root, relative)
+        _write_test_pdf(source_pdf, f"Duplicate paper {index}")
+        store = ResearchWikiStore(session.workspace_root)
+        paper = store.paper_for_source(relative)
+        store.ensure_pdf_copy(paper)
+        store.write_summary(paper, "## 研究问题\n\n- 问题。\n")
+
+    result = asyncio.run(service.chat(session.session_id, "/idea 检查已有方法重复"))
+    task = service.get_task(result["task_id"])
+    trace = json.loads(Path(task.artifact_root, "Content", "IDEA_TRACE.json").read_text(encoding="utf-8"))
+
+    gate = trace["evidence_validation"]["novelty_gate"]
+    assert gate["status"] == "blocked_preliminary"
+    assert any("已经实现相同方法" in reason for reason in gate["reasons"])
+
+
 def test_idea_auto_ingests_uploaded_pdf_and_writes_back_to_wiki(
     service: ResearchAgentService,
     monkeypatch,
@@ -299,3 +515,51 @@ def test_idea_auto_ingests_uploaded_pdf_and_writes_back_to_wiki(
     assert Path(task.artifact_root, "wiki", "ideas", f"{task.task_id}.md").exists()
     relations = Path(task.artifact_root, "wiki", "relations.jsonl").read_text(encoding="utf-8")
     assert "idea_based_on" in relations
+
+
+def test_idea_expands_direct_references_and_queries_all_downloaded_papers(
+    service: ResearchAgentService,
+    monkeypatch,
+):
+    session = service.store.create_session()
+    source_pdf = Path(session.workspace_root, "paper", "uploads", "main-with-references.pdf")
+    _write_main_pdf_with_references(source_pdf)
+    monkeypatch.setattr(config, "wiki_reference_expansion_enabled", True)
+
+    async def fake_resolve(record, *, client, semaphore):
+        return {
+            "title": record.title,
+            "year": record.year,
+            "authors": [],
+            "openalex_id": f"https://openalex.org/{record.reference_id}",
+            "candidate_urls": [f"https://example.org/{record.reference_id}.pdf"],
+        }
+
+    async def fake_download(client, urls, *, timeout_seconds):
+        reference_id = Path(urls[0]).stem
+        return _reference_pdf_bytes(f"Downloaded paper {reference_id}"), ""
+
+    async def generate_idea(*, system_prompt, user_prompt, model=None, temperature=0.3):
+        return _stage_markdown(user_prompt)
+
+    monkeypatch.setattr(reference_expansion, "_resolve_openalex_reference", fake_resolve)
+    monkeypatch.setattr(reference_expansion, "_download_first_pdf", fake_download)
+    monkeypatch.setattr(agent_module, "generate_text", generate_idea)
+
+    result = asyncio.run(service.chat(session.session_id, "/idea 基于上传论文和全部参考文献提出方向"))
+    task = service.get_task(result["task_id"])
+    wiki_root = Path(task.artifact_root, "wiki")
+    paper_directories = list(Path(wiki_root, "papers").glob("P-*"))
+    query_pack = Path(wiki_root, "query_pack.md").read_text(encoding="utf-8")
+    catalog = json.loads(Path(wiki_root, "reference_catalog.json").read_text(encoding="utf-8"))
+    relations = Path(wiki_root, "relations.jsonl").read_text(encoding="utf-8")
+
+    assert result["status"] == "completed"
+    assert len(paper_directories) == 3
+    assert all(Path(directory, "source.pdf").exists() for directory in paper_directories)
+    assert all(Path(directory, "summary.md").exists() for directory in paper_directories)
+    assert len(catalog["records"]) == 2
+    assert {record["status"] for record in catalog["records"]} == {"downloaded"}
+    assert query_pack.count("## P-") == 3
+    assert "Reference Inventory" in query_pack
+    assert relations.count('"relation": "cites"') == 2

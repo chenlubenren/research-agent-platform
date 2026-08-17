@@ -1,40 +1,39 @@
 ---
 name: platform-idea-finalization
-description: Consolidate an idea candidate and critique into a professional, readable, evidence-linked Chinese research idea.
+description: Consolidate a locked candidate and critique into a paper-structured, evidence-linked Chinese research idea.
 ---
 
 # Final Idea Consolidation
 
 ## Goal
 
-Produce a professional, readable final Idea for graduate and doctoral researchers. It must be understandable to a new group member, rigorous enough for discussion, and ready for `/plan` without becoming a full experiment plan.
-
-Reuse only these writing principles, without adding stages: `research-refine` for a fixed problem and minimal mechanism; `research-review` for claim-evidence alignment; `invention-structuring` for problem-solution-value logic; `kill-argument` for the strongest rejection.
+Produce a concise paper-style final Idea for graduate and doctoral researchers. Keep the locked candidate and critic verdict. Reuse only writing principles from `research-refine`, `research-review`, `invention-structuring`, and `kill-argument`; do not add stages.
 
 ## Rules
 
-1. Preserve the locked candidate, critic verdict, criticism, and uncertainty; never switch ideas.
-2. Explain: important problem -> evidence-backed gap -> hypothesis -> minimal mechanism -> value -> falsifiable outcome.
-3. Keep one dominant contribution, not a feature list.
-4. Cite only supplied IDs. Separate paper facts, grounded inference, and unverified assumptions.
-5. Say whether the gap is author-explicit or inferred. Never claim first, full novelty, SOTA, universal compatibility, or preserved theory without proof.
-6. Write clear Simplified Chinese. Start with one sentence and a short plain-language explanation. Explain why the mechanism may work.
-7. Do not invent formulas, symbols, datasets, metrics, hyperparameters, results, or frameworks absent from evidence. Leave implementation and full experiments to `/plan`.
-8. Include scope, strongest rejection, unresolved risks, and an abandon-or-revise condition.
-9. Return one complete Markdown document only; no repeated draft or outer code fence.
-10. After the title, use only the nine required Chinese sections. Do not mention skills, prompts, agents, execution metadata, or append a separate `白话总结`.
+1. Never switch ideas. Preserve the locked candidate, criticism, uncertainty, and strongest rejection.
+2. Use one dominant contribution. Explain the important problem, evidence-backed gap, hypothesis, minimal mechanism, value, and falsifiable outcome.
+3. Cite only supplied Evidence IDs and pages. Separate paper facts, grounded inference, proposed design, and unconfirmed settings.
+4. State whether the gap is author-explicit or inferred. Never claim first, full novelty, SOTA, universal compatibility, or preserved theory without proof. If fewer than five complete readable papers are available, or the candidate is direct author Future Work, mark `status: blocked_preliminary` and do not present it as a new-paper contribution.
+5. Write clear Simplified Chinese. Explain why the mechanism may work; avoid slogans and scattered English.
+6. Related work must synthesize the supplied Cross-Paper Evidence Matrix, compare at least two distinct papers when coverage allows, and admit limited coverage. Metadata-only references are not evidence.
+7. The experiment section must use a few numbered Markdown subheadings such as `### 5.1`. Each block explicitly states 目的、数据集、对照组、评价指标、步骤和输出, and labels 论文已有设置、本项目沿用设置、本项目新增设置、新增设置的文献依据、尚未验证的假设、失败判据. Include ablations, failure criteria, and capacity-matched controls when supported or needed; label proposed or unconfirmed settings and never invent results or hyperparameters.
+8. Use 高节点度节点, not 高阶节点, when referring to node degree.
+9. Include a section named `创新性判定` with current status, Future Work overlap, closest prior work, concrete difference, coverage, unresolved evidence gaps, and whether real experiments are recommended. Include scope, strongest rejection, unresolved risks, and an abandon-or-revise condition.
+10. Return one Markdown document only. Do not mention skills, prompts, agents, execution metadata, or append `白话总结`.
 
 ## Output Shape
 
 Use this exact title and order:
 
 1. `# 最终研究 Idea：<具体、克制、可讨论的中文标题>`
-2. `## 一句话研究 Idea`
-3. `## 研究背景与核心问题`
-4. `## 现有研究不足与可切入空白`
-5. `## 核心假设与方法思路`
-6. `## 预期创新与学术价值`
-7. `## 可证伪预测`
-8. `## 证据依据`
-9. `## 适用边界、风险与不确定性`
-10. `## 交给实验方案模块的下一步`
+2. `## 摘要`
+3. `## 1. 引言`
+4. `## 2. 相关工作`
+5. `## 3. 研究问题与核心假设`
+6. `## 4. 方法思路`
+7. `## 5. 实验方案`
+8. `## 6. 预期贡献与可证伪预测`
+9. `## 7. 局限、风险与不确定性`
+10. `## 8. 结论与下一步`
+11. `## 参考文献与证据`

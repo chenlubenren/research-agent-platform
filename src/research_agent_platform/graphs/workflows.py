@@ -128,9 +128,10 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     title="Idea Candidates",
                     instruction=(
                         "Use the user's objective and any /review evidence in the session to generate three distinct research "
-                        "ideas. When no literature review exists, perform only the targeted novelty search supplied in context. "
+                        "ideas after first reading the supplied Cross-Paper Evidence Matrix and Evidence Coverage. When no literature review exists, perform only the targeted novelty search supplied in context. "
                         "For each idea state the problem, mechanism, novelty thesis, expected contribution, feasibility, and main "
-                        "risk. Do not write an experiment plan. Recommend one candidate and continue automatically. Use a blocking "
+                        "risk, candidate type, supporting Paper IDs and Evidence IDs, author Future Work overlap, closest prior work, concrete difference, and novelty_status. "
+                        "Generate one direct replication, one cross-paper combination, and one mechanism-or-question candidate. Do not write an experiment plan. Recommend one candidate and continue automatically. Use a blocking "
                         "Decision Required only when directions entail materially different scope, cost, risk, or external commitments "
                         "that cannot be resolved from evidence; ordinary topic preferences are not blocking."
                     ),
@@ -157,7 +158,8 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Act as an independent critic of the recommended or user-selected candidate. Test the novelty claim "
                         "against the supplied literature, identify the closest prior work, search for disconfirming evidence, "
-                        "evaluate feasibility and falsifiability, and state what remains uncertain. Do not expand this into a "
+                        "check whether it is merely author Future Work or an already implemented method, evaluate cross-paper support, "
+                        "and state what remains uncertain. Do not expand this into a "
                         "full experiment plan."
                     ),
                     artifact_path="idea/IDEA_VERIFICATION.md",
@@ -184,21 +186,25 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "research Idea for graduate and doctoral researchers. Explain why the problem matters, what the closest "
                         "evidence-backed gap is, how the proposed mechanism addresses it, what the dominant contribution is, and "
                         "how the idea could be falsified. Keep facts, evidence-backed inference, and unverified assumptions "
-                        "clearly separated. Preserve evidence caveats and hand only high-level validation requirements to /plan "
-                        "instead of drafting a complete experiment plan."
+                        "clearly separated. Include a concise but concrete paper-style experiment section covering evidence-backed "
+                        "datasets, baselines, metrics, experiment blocks, ablations, and failure criteria. Keep implementation "
+                        "commands, exact runtime configuration, and the complete execution plan in /plan. If fewer than five complete readable papers are available, "
+                        "or direct Future Work overlap or unsupported novelty remains, mark the document status as blocked_preliminary instead of claiming a new-paper contribution."
                     ),
                     artifact_path="idea/FINAL_IDEA.md",
                     artifact_kind="report",
                     required_sections=[
-                        "一句话研究 Idea",
-                        "研究背景与核心问题",
-                        "现有研究不足与可切入空白",
-                        "核心假设与方法思路",
-                        "预期创新与学术价值",
-                        "可证伪预测",
-                        "证据依据",
-                        "适用边界、风险与不确定性",
-                        "交给实验方案模块的下一步",
+                        "摘要",
+                        "1. 引言",
+                        "2. 相关工作",
+                        "3. 研究问题与核心假设",
+                        "4. 方法思路",
+                        "5. 实验方案",
+                        "6. 预期贡献与可证伪预测",
+                        "7. 局限、风险与不确定性",
+                        "创新性判定",
+                        "8. 结论与下一步",
+                        "参考文献与证据",
                     ],
                     skill_paths=_skills(
                         "platform-idea-finalization",

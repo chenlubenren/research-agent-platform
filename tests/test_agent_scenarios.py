@@ -311,15 +311,16 @@ def test_idea_verification_runs_without_routine_checkpoint(service: ResearchAgen
         if "Current stage: Final Idea" in user_prompt:
             return (
                 "# 最终研究 Idea：示例方向\n\n"
-                "## 一句话研究 Idea\n- Topic.\n\n"
-                "## 研究背景与核心问题\n- Background.\n\n"
-                "## 现有研究不足与可切入空白\n- Gap.\n\n"
-                "## 核心假设与方法思路\n- A.\n\n"
-                "## 预期创新与学术价值\n- B.\n\n"
-                "## 可证伪预测\n- C.\n\n"
-                "## 证据依据\n- D.\n\n"
-                "## 适用边界、风险与不确定性\n- F.\n\n"
-                "## 交给实验方案模块的下一步\n- Ready."
+                "## 摘要\n- Topic.\n\n"
+                "## 1. 引言\n- Background.\n\n"
+                "## 2. 相关工作\n- Prior.\n\n"
+                "## 3. 研究问题与核心假设\n- Gap.\n\n"
+                "## 4. 方法思路\n- A.\n\n"
+                "## 5. 实验方案\n- Experiment.\n\n"
+                "## 6. 预期贡献与可证伪预测\n- C.\n\n"
+                "## 7. 局限、风险与不确定性\n- F.\n\n"
+                "## 8. 结论与下一步\n- Ready.\n\n"
+                "## 参考文献与证据\n- D."
             )
         return content
 
