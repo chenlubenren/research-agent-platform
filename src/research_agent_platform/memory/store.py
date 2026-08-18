@@ -217,6 +217,7 @@ class ResearchWikiStore:
     def coverage_report(self, *, minimum_papers: int | None = None) -> dict:
         minimum = minimum_papers or self.DEFAULT_IDEA_MINIMUM_PAPERS
         papers = self.list_papers()
+        full_text_papers = [paper for paper in papers if self._is_complete_evidence_paper(paper)]
         catalog_records = self._reference_catalog_records()
         metadata_only = sum(
             1
@@ -225,8 +226,9 @@ class ResearchWikiStore:
         )
         return {
             "minimum_papers": minimum,
-            "full_text_papers": len(papers),
-            "full_text_paper_ids": [paper.paper_id for paper in papers],
+            "full_text_papers": len(full_text_papers),
+            "full_text_paper_ids": [paper.paper_id for paper in full_text_papers],
+            "incomplete_papers": len(papers) - len(full_text_papers),
             "downloaded_reference_papers": sum(
                 1
                 for record in catalog_records
@@ -234,8 +236,19 @@ class ResearchWikiStore:
             ),
             "metadata_only_references": metadata_only,
             "reference_records": len(catalog_records),
-            "ready_for_top_journal_candidate": len(papers) >= minimum,
+            "ready_for_top_journal_candidate": len(full_text_papers) >= minimum,
         }
+
+    def _is_complete_evidence_paper(self, paper: WikiPaper) -> bool:
+        pdf_path = self._workspace_path(paper.wiki_pdf_relative_path)
+        summary_path = self._workspace_path(paper.summary_relative_path)
+        if not pdf_path.is_file() or not summary_path.is_file():
+            return False
+        try:
+            summary = summary_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        return bool(re.search(r"\bPE-[A-F0-9]{10}\b", summary, re.I))
 
     def _coverage_lines(self, coverage: dict) -> list[str]:
         ready = "是" if coverage["ready_for_top_journal_candidate"] else "否"
@@ -245,6 +258,7 @@ class ResearchWikiStore:
             f"- 完整可读论文数: {coverage['full_text_papers']}",
             f"- Idea 定稿最低要求: {coverage['minimum_papers']}",
             f"- 仅元数据参考文献数: {coverage['metadata_only_references']}",
+            f"- 缺少 PDF、总结或 Evidence ID 的论文数: {coverage['incomplete_papers']}",
             f"- 参考文献记录总数: {coverage['reference_records']}",
             f"- 是否达到顶刊候选门槛: {ready}",
             f"- 可作为证据的 Paper ID: {', '.join(f'`{item}`' for item in coverage['full_text_paper_ids']) or '暂无'}",

@@ -75,7 +75,7 @@ def test_expand_references_downloads_public_pdfs_and_records_failures(
             }
         return {}
 
-    async def fake_download(client, urls, *, timeout_seconds):
+    async def fake_download(client, urls, *, timeout_seconds, max_bytes):
         if "alpha.pdf" in urls[0]:
             return _pdf_bytes(["Reliable graph baselines", "Discussion and experiments"]), ""
         return b"", "not available"

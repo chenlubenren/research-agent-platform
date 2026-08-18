@@ -108,8 +108,15 @@ from .review_pipeline import (
     build_review_quality_reports,
     clean_review_topic,
     parse_review_queries,
+    query_effectiveness_payload,
+    review_directions_markdown,
     review_evidence_is_sufficient,
     review_quality_markdown,
+)
+from .reference_expansion import (
+    ReferenceExpansionResult,
+    expand_pdf_references,
+    reference_catalog_markdown,
 )
 from .router.intent import (
     RouteDecision,
@@ -481,7 +488,24 @@ class ResearchAgentService:
             for role, content in role_reviews.items()
         }
         role_merge = merge_role_findings(role_findings)
+        unavailable_roles = [
+            role
+            for role, content in role_reviews.items()
+            if self._role_review_status(content) == "unavailable"
+        ]
+        if unavailable_roles:
+            role_merge["review_status"] = "needs_attention"
+            role_merge["unavailable_roles"] = unavailable_roles
+            review_payload["review_status"] = "needs_attention"
+            review_payload["unavailable_roles"] = unavailable_roles
+            review_payload.setdefault("limitations", []).append(
+                "One or more isolated reviewer calls were unavailable; rerun the simulated review before relying on it."
+            )
+        else:
+            role_merge["review_status"] = "available"
+            review_payload["review_status"] = "available"
         review_payload["role_review_merge"] = role_merge
+        review_report = await self._merge_role_reviews(review_payload, role_reviews, role_merge)
         role_artifacts = [
             self._write_text(
                 task,
@@ -511,7 +535,7 @@ class ResearchAgentService:
                 self._write_text(
                     task,
                     "rebuttal/REVIEW_REPORT.md",
-                    await self._merge_role_reviews(review_payload, role_reviews, role_merge),
+                    review_report,
                     kind="report",
                     description="Author-facing simulated peer-review report.",
                 ),
@@ -571,16 +595,40 @@ class ResearchAgentService:
                         "\"evidence_ids\":[string]}]}. Return an empty findings array when there is no supported finding."
                     ),
                     user_prompt=f"Role focus: {instruction}\n\nManuscript path: {manuscript_path}\n\nFrozen manuscript:\n{frozen}",
+                    model=configured_model_for_role("review"),
                     temperature=0,
                 )
-                return role, content.strip() or '{"findings": []}'
+                content = content.strip()
+                if not content or self._role_review_status(content) == "unavailable":
+                    return role, json.dumps(
+                        {"status": "unavailable", "error_type": "InvalidReviewerResponse", "findings": []}
+                    )
+                return role, content
             except Exception as exc:
-                return role, '{"findings": []}'
+                return role, json.dumps(
+                    {"status": "unavailable", "error_type": type(exc).__name__, "findings": []}
+                )
 
         results = await asyncio.gather(*(review(role, instruction) for role, instruction in roles.items()))
         return dict(results)
 
+    @staticmethod
+    def _role_review_status(content: str) -> str:
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return "unavailable"
+        if not isinstance(payload, dict) or not isinstance(payload.get("findings"), list):
+            return "unavailable"
+        return "unavailable" if payload.get("status") == "unavailable" else "available"
+
     async def _merge_role_reviews(self, review_payload: dict, role_reviews: dict[str, str], role_merge: dict) -> str:
+        if role_merge.get("review_status") == "needs_attention":
+            fallback = dict(review_payload)
+            if role_merge.get("findings"):
+                fallback["findings"] = role_merge["findings"]
+            fallback["decision"] = "REVIEW_UNAVAILABLE"
+            return review_report_markdown(fallback)
         role_context = "\n\n".join(f"## {role}\n{content[:5000]}" for role, content in role_reviews.items())
         try:
             content = await generate_text(
@@ -594,15 +642,24 @@ class ResearchAgentService:
                     f"Structured role meta-review:\n{json.dumps(role_merge, ensure_ascii=False)}\n\n"
                     f"Raw role outputs:\n{role_context}"
                 ),
+                model=configured_model_for_role("meta_review"),
                 temperature=0,
             )
             if content.lstrip().startswith("# Simulated Peer Review"):
                 return content.strip() + "\n"
-        except Exception:
-            pass
+        except Exception as exc:
+            role_merge["review_status"] = "needs_attention"
+            role_merge["meta_review_status"] = "unavailable"
+            role_merge["meta_review_error_type"] = type(exc).__name__
+            review_payload["review_status"] = "needs_attention"
+            review_payload.setdefault("limitations", []).append(
+                "The author-facing meta-review call was unavailable; deterministic findings were retained."
+            )
         fallback = dict(review_payload)
-        if role_merge["findings"]:
+        if role_merge.get("findings"):
             fallback["findings"] = role_merge["findings"]
+        if role_merge.get("review_status") == "needs_attention":
+            fallback["decision"] = "REVIEW_UNAVAILABLE"
         return review_report_markdown(fallback)
 
     async def _prepare_chat_session(
@@ -1525,6 +1582,17 @@ class ResearchAgentService:
             content = self._deterministic_review_evidence_map(task)
         if not content.strip():
             raise RuntimeError(f"Empty content from upstream for stage {stage.name}")
+        if task.command == "/idea" and stage.name == "final_idea":
+            content, novelty_gate = self._apply_idea_novelty_gate(task, content)
+            task.artifacts.append(
+                self._write_text(
+                    task,
+                    "Content/IDEA_NOVELTY_GATE.json",
+                    json.dumps(novelty_gate, ensure_ascii=False, indent=2) + "\n",
+                    kind="manifest",
+                    description="Deterministic evidence-coverage and novelty gate for the final Idea.",
+                )
+            )
         self._log_progress(task, f"上游模型已返回阶段内容: {stage.title}", kind="model")
         artifact = self._write_text(
             task,
@@ -1724,8 +1792,11 @@ class ResearchAgentService:
         workspace_root = Path(task.artifact_root)
         wiki_store = ResearchWikiStore(workspace_root)
         artifacts: list = []
-        for source_ref in discover_pdf_sources(workspace_root):
+        source_refs = discover_pdf_sources(workspace_root)
+        primary_papers: dict[str, WikiPaper] = {}
+        for source_ref in source_refs:
             paper = wiki_store.paper_for_source(source_ref)
+            primary_papers[source_ref] = paper
             wiki_store.ensure_pdf_copy(paper)
             source_path = workspace_root / source_ref
             artifacts.append(
@@ -1759,6 +1830,16 @@ class ResearchAgentService:
                 )
             )
 
+        if config.wiki_reference_expansion_enabled:
+            artifacts.extend(
+                await self._expand_wiki_references(
+                    task,
+                    wiki_store,
+                    source_refs,
+                    primary_papers,
+                )
+            )
+
         artifacts.append(
             self._write_text(
                 task,
@@ -1768,7 +1849,13 @@ class ResearchAgentService:
                 description="Upstream Research Wiki paper index.",
             )
         )
-        query_pack = wiki_store.query_pack(task.objective)
+        query_pack = wiki_store.query_pack(
+            task.objective,
+            limit=(config.wiki_idea_query_paper_limit if task.command == "/idea" else 5),
+            character_limit=(
+                config.wiki_idea_query_character_limit if task.command == "/idea" else 8000
+            ),
+        )
         artifacts.append(
             self._write_text(
                 task,
@@ -1787,6 +1874,141 @@ class ResearchAgentService:
             if local_context.limitations:
                 context_parts.append("Evidence limitations:\n- " + "\n- ".join(local_context.limitations))
         return artifacts, "\n\n".join(context_parts), has_wiki_papers
+
+    async def _expand_wiki_references(
+        self,
+        task: TaskRun,
+        wiki_store: ResearchWikiStore,
+        source_refs: list[str],
+        primary_papers: dict[str, WikiPaper],
+    ) -> list:
+        workspace_root = Path(task.artifact_root)
+        artifacts: list = []
+        expansion_results: list[ReferenceExpansionResult] = []
+        remaining_total_bytes = max(1, config.wiki_reference_max_total_mb) * 1024 * 1024
+        uploaded_sources = [ref for ref in source_refs if "/uploads/" in ref]
+        for source_ref in uploaded_sources[: max(0, config.wiki_reference_source_limit)]:
+            if remaining_total_bytes <= 0:
+                break
+            primary_paper = primary_papers[source_ref]
+            self._log_progress(
+                task,
+                f"正在按显式配置扩展直接参考文献：{primary_paper.paper_id}",
+                kind="retrieval",
+            )
+            result = await expand_pdf_references(
+                source_ref,
+                workspace_root,
+                primary_paper_id=primary_paper.paper_id,
+                limit=config.wiki_reference_limit,
+                download_limit=config.wiki_reference_download_limit,
+                timeout_seconds=config.wiki_reference_timeout_seconds,
+                max_pdf_mb=config.wiki_reference_max_pdf_mb,
+                max_total_mb=config.wiki_reference_max_total_mb,
+                max_total_bytes=remaining_total_bytes,
+            )
+            expansion_results.append(result)
+            remaining_total_bytes -= sum(
+                (workspace_root / record.source_relative_path).stat().st_size
+                for record in result.records
+                if record.status == "downloaded"
+                and record.source_relative_path
+                and (workspace_root / record.source_relative_path).is_file()
+            )
+            manifest_path = workspace_root / result.manifest_relative_path
+            artifacts.append(
+                self._write_text(
+                    task,
+                    result.manifest_relative_path,
+                    manifest_path.read_text(encoding="utf-8"),
+                    kind="wiki",
+                    description=f"Reference expansion manifest for {primary_paper.paper_id}.",
+                )
+            )
+            for record in result.records:
+                if record.status not in {"downloaded", "duplicate"} or not record.source_relative_path:
+                    continue
+                reference_paper = wiki_store.paper_for_source(record.source_relative_path)
+                record.paper_id = reference_paper.paper_id
+                if reference_paper.paper_id == primary_paper.paper_id:
+                    continue
+                wiki_store.ensure_pdf_copy(reference_paper)
+                wiki_pdf = workspace_root / reference_paper.wiki_pdf_relative_path
+                artifacts.append(
+                    self._write_bytes(
+                        task,
+                        reference_paper.wiki_pdf_relative_path,
+                        wiki_pdf.read_bytes(),
+                        kind="document",
+                        description=f"Wiki PDF copy for cited paper {reference_paper.paper_id}.",
+                    )
+                )
+                evidence_records = collect_paper_evidence(
+                    workspace_root,
+                    [record.source_relative_path],
+                    total_limit=18000,
+                )
+                if wiki_store.summary_exists(reference_paper):
+                    summary = (workspace_root / reference_paper.summary_relative_path).read_text(
+                        encoding="utf-8", errors="ignore"
+                    )
+                else:
+                    summary = wiki_store.paper_summary_markdown(
+                        reference_paper,
+                        await self._generate_wiki_paper_summary(
+                            task,
+                            reference_paper,
+                            evidence_records,
+                        ),
+                    )
+                artifacts.append(
+                    self._write_text(
+                        task,
+                        reference_paper.summary_relative_path,
+                        summary,
+                        kind="wiki",
+                        description=f"Wiki summary for cited paper {reference_paper.paper_id}.",
+                    )
+                )
+            wiki_store.append_citation_relations(
+                primary_paper.paper_id,
+                [record.__dict__ for record in result.records],
+            )
+
+        if not expansion_results:
+            return artifacts
+        catalog_records = [
+            record.__dict__
+            for result in expansion_results
+            for record in result.records
+        ]
+        artifacts.extend(
+            [
+                self._write_text(
+                    task,
+                    "wiki/reference_catalog.json",
+                    json.dumps(
+                        {
+                            "primary_sources": [result.primary_source for result in expansion_results],
+                            "records": catalog_records,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    kind="wiki",
+                    description="Reference inventory with download and Wiki ingestion status.",
+                ),
+                self._write_text(
+                    task,
+                    "wiki/reference_catalog.md",
+                    reference_catalog_markdown(expansion_results),
+                    kind="wiki",
+                    description="Human-readable reference expansion catalog.",
+                ),
+            ]
+        )
+        return artifacts
 
     async def _generate_wiki_paper_summary(
         self,
@@ -1808,8 +2030,9 @@ class ResearchAgentService:
                 user_prompt=(
                     f"Paper ID: {paper.paper_id}\nSource PDF: {paper.source_relative_path}\n\n"
                     "Use exactly these sections: 研究问题, 核心方法, 数据集与实验设置, 主要结果, "
-                    "作者讨论与局限, 作者提出的未来工作, 可复用证据, 与其他论文的关系, "
-                    "对 Idea 生成的提示. Every factual point must cite an available Evidence ID and page. "
+                    "作者讨论与局限, 作者提出的未来工作, 作者明确指出的 Gap, 基于证据推断的 Gap, "
+                    "可复用证据, 与其他论文的关系, 对 Idea 生成的提示, 证据边界与未确认内容. "
+                    "Keep author-explicit gaps separate from model inference. Every factual point must cite an available Evidence ID and page. "
                     "Write 未确认 when evidence does not support a section.\n\n"
                     f"Evidence:\n{evidence_context}"
                 ),
@@ -2011,6 +2234,20 @@ class ResearchAgentService:
                     kind="review",
                     description="Deterministic retrieval coverage and evidence gate.",
                 ),
+                self._write_text(
+                    task,
+                    "bib/QUERY_YIELD.json",
+                    json.dumps(query_effectiveness_payload(bundle), ensure_ascii=False, indent=2) + "\n",
+                    kind="manifest",
+                    description="Per-query retained-paper metrics for retrieval tuning.",
+                ),
+                self._write_text(
+                    task,
+                    "bib/REVIEW_DIRECTIONS.md",
+                    review_directions_markdown(bundle),
+                    kind="report",
+                    description="Research-direction fallback grounded in the retained retrieval set.",
+                ),
             ]
             generated.extend(download_artifacts)
             generated_paths = {artifact.relative_path for artifact in generated}
@@ -2130,6 +2367,8 @@ class ResearchAgentService:
             "INSTITUTIONAL_ACCESS.json",
             "INSTITUTIONAL_ACCESS.md",
             "RETRIEVAL_QUALITY.md",
+            "QUERY_YIELD.json",
+            "REVIEW_DIRECTIONS.md",
             "LITERATURE_REVIEW.md",
             "EVIDENCE_MAP.md",
             "RESEARCH_GAPS.md",
@@ -2968,6 +3207,92 @@ class ResearchAgentService:
                 description="Upstream Research Wiki Idea-to-paper relation edges.",
             ),
         ]
+
+    def _apply_idea_novelty_gate(self, task: TaskRun, content: str) -> tuple[str, dict]:
+        coverage = ResearchWikiStore(task.artifact_root).coverage_report()
+        reasons: list[str] = []
+        minimum = int(coverage["minimum_papers"])
+        full_text_count = int(coverage["full_text_papers"])
+        if full_text_count < minimum:
+            reasons.append(
+                f"完整可读论文只有 {full_text_count} 篇，低于高置信候选最低要求 {minimum} 篇。"
+            )
+        combined_text = "\n".join(
+            (
+                self._artifact_text(task, "idea/IDEA_CANDIDATES.md"),
+                self._artifact_text(task, "idea/IDEA_VERIFICATION.md"),
+                content,
+            )
+        )
+        reasons.extend(self._idea_novelty_risk_reasons(combined_text))
+        if len(set(re.findall(r"\bP-[A-F0-9]{12}\b", content, re.I))) < 2:
+            reasons.append("最终文档没有明确使用至少两篇完整论文形成跨论文差异。")
+        if not re.search(r"(?:可证伪|失败判据|falsif|失败标准)", content, re.I):
+            reasons.append("最终文档没有明确的可证伪实验或失败判据。")
+        reasons = list(dict.fromkeys(reasons))
+        gate = {
+            "status": "blocked_preliminary" if reasons else "pass",
+            "minimum_papers": minimum,
+            "full_text_papers": full_text_count,
+            "full_text_paper_ids": coverage["full_text_paper_ids"],
+            "reasons": reasons,
+        }
+        if not reasons:
+            return content, gate
+        block = [
+            "## 创新性判定",
+            "",
+            "- status: `blocked_preliminary`",
+            "- 结论: 当前内容只能作为实验起点，不能包装为已经成立的新论文主张。",
+            f"- 完整可读论文: {full_text_count}/{minimum}。",
+            "- 当前证据覆盖: "
+            + (", ".join(f"`{item}`" for item in coverage["full_text_paper_ids"]) or "暂无")
+            + "。",
+            "- 是否建议进入真实实验: 仅建议复现或预实验；补齐证据并重新核验后再升级主张。",
+            "",
+            "### 拦截原因",
+            "",
+            *[f"- {reason}" for reason in reasons],
+        ]
+        block_text = "\n".join(block)
+        if re.search(r"(?mi)^##\s*创新性判定\s*$", content):
+            content = re.sub(
+                r"(?ms)^##\s*创新性判定\s*\n.*?(?=^##\s|\Z)",
+                block_text + "\n\n",
+                content,
+                count=1,
+            )
+        else:
+            content = content.rstrip() + "\n\n" + block_text + "\n"
+        return content, gate
+
+    @staticmethod
+    def _idea_novelty_risk_reasons(text: str) -> list[str]:
+        reasons: list[str] = []
+        for line in text.splitlines():
+            normalized = line.casefold()
+            positive = re.search(
+                r"(?:\||:|：)\s*(?:是|yes|true|direct_extension|直接延伸|直接复述|已经实现|已实现)\b",
+                line,
+                re.I,
+            )
+            if positive and any(
+                marker in normalized
+                for marker in ("future work", "未来工作", "直接延伸", "直接复述")
+            ):
+                reasons.append("候选或批评结果显示它可能只是作者 Future Work 的直接延伸。")
+            if positive and any(
+                marker in normalized
+                for marker in ("已有论文", "已有方法", "是否已经实现", "重复风险")
+            ):
+                reasons.append("候选或批评结果显示已有论文可能已经实现相同方法。")
+            if "证据不足" in normalized and not re.search(
+                r"(?:不存在|不是|并非|已解决|已补足|否).{0,8}证据不足",
+                line,
+                re.I,
+            ):
+                reasons.append("候选或批评结果仍明确标记为证据不足。")
+        return reasons
 
     async def _write_figure_delivery_artifacts(self, task: TaskRun) -> list:
         contract_text = self._artifact_text(task, "figures/FIGURE_CONTRACT.json")

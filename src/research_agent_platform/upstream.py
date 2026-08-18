@@ -20,6 +20,7 @@ CHAT_MODEL_PREFERENCE = [
 ]
 
 NON_CHAT_MODEL_TOKENS = ("image", "realtime", "audio", "tts", "transcribe")
+RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,8 @@ def configured_model_for_role(role: str) -> str | None:
         "idea_generator": config.idea_generator_model,
         "idea_critic": config.idea_critic_model,
         "idea_finalizer": config.idea_final_model,
+        "review": config.upstream_review_model,
+        "meta_review": config.upstream_review_model,
     }
     return role_models.get(role, "") or config.upstream_model or None
 
@@ -59,11 +62,12 @@ def _auth_headers() -> dict[str, str]:
 
 async def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     url = f"{config.upstream_base_url.rstrip('/')}/{path.lstrip('/')}"
+    retryable = method.upper() in RETRYABLE_METHODS
     response: httpx.Response | None = None
     for attempt in range(3):
         async with httpx.AsyncClient(timeout=config.request_timeout_seconds) as client:
             response = await client.request(method, url, headers=_headers(), json=payload)
-        if response.status_code not in {502, 503, 504} or attempt == 2:
+        if not retryable or response.status_code not in {502, 503, 504} or attempt == 2:
             break
     assert response is not None
     if response.status_code >= 400:

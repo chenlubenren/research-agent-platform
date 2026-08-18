@@ -194,7 +194,89 @@ def review_quality_markdown(
             "- Evidence is insufficient for a formal review. Do not generate a literature synthesis, evidence map, or research-gap claim from this retrieval."
         )
         lines.append("- Add local papers or restore another scholarly provider, then rerun `/review`.")
+    lines.extend(["", query_effectiveness_markdown(query_effectiveness_payload(bundle)).rstrip()])
     return "\n".join(lines) + "\n"
+
+
+def query_effectiveness_payload(bundle: LiteratureBundle) -> dict:
+    slots: dict[str, dict] = {
+        query: {"query": query, "retained": 0, "providers": set(), "paper_ids": []}
+        for query in bundle.queries
+    }
+    for paper in bundle.papers:
+        for query in paper.matched_queries or ["(unmatched)"]:
+            slot = slots.setdefault(
+                query,
+                {"query": query, "retained": 0, "providers": set(), "paper_ids": []},
+            )
+            slot["retained"] += 1
+            slot["providers"].update(paper.sources)
+            slot["paper_ids"].append(paper.paper_id)
+    total = max(1, len(bundle.papers))
+    rows = []
+    for slot in slots.values():
+        rows.append(
+            {
+                "query": slot["query"],
+                "retained": slot["retained"],
+                "retained_share": round(slot["retained"] / total, 3),
+                "providers": sorted(slot["providers"]),
+                "paper_ids": list(dict.fromkeys(slot["paper_ids"])),
+            }
+        )
+    rows.sort(key=lambda item: (item["retained"], item["query"]), reverse=True)
+    return {
+        "candidate_count": int(bundle.quality.get("candidate_count", len(bundle.papers))),
+        "retained_count": len(bundle.papers),
+        "excluded_count": bundle.excluded_count,
+        "per_query": rows,
+        "note": "Per-query values count retained records matched to each query; one paper may match multiple queries.",
+    }
+
+
+def query_effectiveness_markdown(metrics: dict) -> str:
+    lines = [
+        "## Query Effectiveness",
+        "",
+        f"- Candidate records: {metrics.get('candidate_count', 0)}",
+        f"- Retained records: {metrics.get('retained_count', 0)}",
+        f"- Excluded records: {metrics.get('excluded_count', 0)}",
+        "",
+        "| Query | retained | share | providers |",
+        "|---|---:|---:|---|",
+    ]
+    for row in metrics.get("per_query", []):
+        providers = ", ".join(row.get("providers", [])) or "-"
+        lines.append(
+            f"| {row['query']} | {row['retained']} | {row['retained_share']} | {providers} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def review_directions_markdown(bundle: LiteratureBundle, *, maximum: int = 5) -> str:
+    metrics = query_effectiveness_payload(bundle)
+    lines = [
+        "# Retrieved Research Directions",
+        "",
+        "These directions are grounded in the retained papers and use retrieval facets as a deterministic fallback; they are not independent novelty claims.",
+        "",
+    ]
+    populated = [row for row in metrics["per_query"] if row["paper_ids"]][: max(1, maximum)]
+    if not populated:
+        return "\n".join(lines + ["- No retained direction could be formed.", ""])
+    for index, row in enumerate(populated, start=1):
+        lines.extend(
+            [
+                f"## D{index}: {row['query']}",
+                "",
+                f"- Retained papers: {row['retained']}",
+                "- Representative IDs: "
+                + ", ".join(f"`{paper_id}`" for paper_id in row["paper_ids"][:5]),
+                "- Boundary: inspect titles/abstracts/full text before treating this facet as a coherent research theme.",
+                "",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def review_evidence_is_sufficient(

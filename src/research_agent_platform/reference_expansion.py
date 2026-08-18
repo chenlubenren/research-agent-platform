@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import difflib
 import hashlib
+import ipaddress
 import json
 import re
+import socket
 import urllib.parse
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -101,6 +103,9 @@ async def expand_pdf_references(
     limit: int = 100,
     download_limit: int = 100,
     timeout_seconds: float = 20.0,
+    max_pdf_mb: int = 20,
+    max_total_mb: int = 50,
+    max_total_bytes: int | None = None,
     cache: bool = True,
 ) -> ReferenceExpansionResult:
     """Resolve and download direct references for one uploaded PDF.
@@ -134,7 +139,7 @@ async def expand_pdf_references(
 
     semaphore = asyncio.Semaphore(4)
     async with httpx.AsyncClient(
-        follow_redirects=True,
+        follow_redirects=False,
         timeout=timeout_seconds,
         headers={"User-Agent": "research-agent-platform/0.1"},
     ) as client:
@@ -166,6 +171,7 @@ async def expand_pdf_references(
                     client,
                     record.candidate_urls,
                     timeout_seconds=timeout_seconds,
+                    max_bytes=max(1, max_pdf_mb) * 1024 * 1024,
                 )
             return record, content, error
 
@@ -173,10 +179,20 @@ async def expand_pdf_references(
             *(download_record(record) for record in downloadable)
         )
         known_hashes = _known_pdf_hashes(workspace)
+        total_bytes = 0
+        total_limit = (
+            max(1, max_total_bytes)
+            if max_total_bytes is not None
+            else max(1, max_total_mb) * 1024 * 1024
+        )
         for record, content, error in download_results:
             if not content:
                 record.status = "unavailable"
                 record.reason = error or "公开 PDF 下载失败。"
+                continue
+            if total_bytes + len(content) > total_limit:
+                record.status = "skipped_total_limit"
+                record.reason = f"参考文献总下载上限为 {max_total_mb} MB。"
                 continue
             digest = hashlib.sha256(content).hexdigest()
             if digest in known_hashes:
@@ -189,6 +205,7 @@ async def expand_pdf_references(
             target = workspace / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
+            total_bytes += len(content)
             known_hashes[digest] = relative_path
             record.status = "downloaded"
             record.source_relative_path = relative_path
@@ -445,23 +462,76 @@ async def _download_first_pdf(
     urls: list[str],
     *,
     timeout_seconds: float,
+    max_bytes: int,
 ) -> tuple[bytes, str]:
     last_error = ""
     for url in urls:
         try:
-            parsed = urllib.parse.urlparse(url)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                continue
-            response = await client.get(url, timeout=timeout_seconds)
-            response.raise_for_status()
-            content = response.content
-            if not content.startswith(b"%PDF"):
-                last_error = "响应不是 PDF。"
-                continue
-            return content, ""
+            current_url = url
+            for _ in range(6):
+                safe, reason = await _is_safe_public_url(current_url)
+                if not safe:
+                    last_error = reason
+                    break
+                async with client.stream("GET", current_url, timeout=timeout_seconds) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location", "")
+                        if not location:
+                            last_error = "重定向响应缺少 Location。"
+                            break
+                        current_url = urllib.parse.urljoin(current_url, location)
+                        continue
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length")
+                    if content_length and int(content_length) > max_bytes:
+                        last_error = "PDF 响应超过单文件大小上限。"
+                        break
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            last_error = "PDF 下载超过单文件大小上限。"
+                            break
+                        chunks.append(chunk)
+                    else:
+                        content = b"".join(chunks)
+                        if not content.startswith(b"%PDF"):
+                            last_error = "响应不是 PDF。"
+                            break
+                        return content, ""
+                    break
         except (httpx.HTTPError, ValueError, OSError) as exc:
             last_error = str(exc) or exc.__class__.__name__
     return b"", last_error or "没有可用下载地址。"
+
+
+async def _is_safe_public_url(value: str) -> tuple[bool, str]:
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except ValueError:
+        return False, "URL 无法解析。"
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, "只允许公网 HTTP/HTTPS URL。"
+    hostname = parsed.hostname.rstrip(".").casefold()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return False, "禁止访问本机地址。"
+    try:
+        addresses = await asyncio.to_thread(
+            socket.getaddrinfo,
+            hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror:
+        return False, "URL 主机无法解析。"
+    if not addresses:
+        return False, "URL 主机没有可用地址。"
+    for item in addresses:
+        address = ipaddress.ip_address(item[4][0].split("%")[0])
+        if not address.is_global:
+            return False, "禁止访问内网、回环、链路本地或保留地址。"
+    return True, ""
 
 
 def _known_pdf_hashes(workspace: Path) -> dict[str, str]:

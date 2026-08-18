@@ -338,17 +338,26 @@ def review_report_markdown(payload: dict) -> str:
     """Render the author-facing simulated review without exposing internal gates."""
     findings = payload.get("findings") or []
     decision = str(payload.get("decision") or "REVISE")
+    status = str(payload.get("review_status") or "available")
     lines = [
         "# Simulated Peer Review",
         "",
         f"- Manuscript: `{payload.get('manuscript_path', 'unknown')}`",
+        f"- Status: {status}",
         f"- Recommendation: {decision}",
         "- Scope: This is a simulated scholarly review, not an editorial decision or a submission-readiness certification.",
         "",
         "## Editorial Summary",
         "",
     ]
-    if not findings:
+    if status == "needs_attention":
+        unavailable_roles = ", ".join(str(role) for role in payload.get("unavailable_roles") or [])
+        detail = f" Unavailable reviewer roles: {unavailable_roles}." if unavailable_roles else ""
+        lines.append(
+            "The simulated review is incomplete and must not be treated as a clean review result."
+            + detail
+        )
+    elif not findings:
         lines.append("No material issue was identified by the automated simulated review. The author should still verify evidence, citations, and venue requirements before submission.")
     else:
         major_count = sum(item.get("severity") == "major" for item in findings)

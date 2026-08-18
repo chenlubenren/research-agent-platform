@@ -128,9 +128,11 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     title="Idea Candidates",
                     instruction=(
                         "Use the user's objective and any /review evidence in the session to generate three distinct research "
-                        "ideas. When no literature review exists, perform only the targeted novelty search supplied in context. "
+                        "ideas after reading Evidence Coverage and the Cross-Paper Evidence Matrix. When no literature review "
+                        "exists, perform only the targeted novelty search supplied in context. "
                         "For each idea state the problem, mechanism, novelty thesis, expected contribution, feasibility, and main "
-                        "risk. Do not write an experiment plan. Recommend one candidate and continue automatically. Use a blocking "
+                        "risk. Also identify supporting Paper IDs and Evidence IDs, possible author Future Work overlap, the closest "
+                        "prior work, and the concrete difference. Do not write an experiment plan. Recommend one candidate and continue automatically. Use a blocking "
                         "Decision Required only when directions entail materially different scope, cost, risk, or external commitments "
                         "that cannot be resolved from evidence; ordinary topic preferences are not blocking."
                     ),
@@ -164,7 +166,8 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Act as an independent critic of the recommended or user-selected candidate. Test the novelty claim "
                         "against the supplied literature, identify the closest prior work, search for disconfirming evidence, "
-                        "evaluate feasibility and falsifiability, and state what remains uncertain. Do not expand this into a "
+                        "check whether it only repeats author Future Work or an already implemented method, evaluate cross-paper "
+                        "support, feasibility and falsifiability, and state what remains uncertain. Do not expand this into a "
                         "full experiment plan."
                     ),
                     artifact_path="idea/IDEA_VERIFICATION.md",
@@ -193,7 +196,9 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Consolidate the chosen candidate and verification findings into a concise final research idea that can "
                         "be handed to /plan. Preserve evidence caveats, define the problem anchor, method thesis, dominant "
-                        "contribution, falsifiable prediction, scope boundary, and unresolved risks."
+                        "contribution, falsifiable prediction, scope boundary, and unresolved risks. If evidence coverage, the "
+                        "cross-paper difference, or falsifiability is insufficient, retain a blocked_preliminary status rather "
+                        "than overclaiming novelty."
                     ),
                     artifact_path="idea/FINAL_IDEA.md",
                     artifact_kind="report",
@@ -589,7 +594,10 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     title="Research Brief",
                     instruction=(
                         "Turn the user's request into a bounded, reproducible retrieval protocol before any external search. "
-                        "Define the research question, review type, technical concept groups, time range, publication policy, "
+                        "First write a Clarified Scope that makes explicit the research object, core questions, concept boundary, "
+                        "methods or application context, time/language/publication range, and inclusion/exclusion defaults. "
+                        "When ambiguity would materially change scope or cost, add a blocking Decision Required section with "
+                        "specific adaptive questions; otherwise continue with conservative defaults. Define the research question, review type, technical concept groups, time range, publication policy, "
                         "and explicit inclusion/exclusion criteria. Under Search Strategy, provide exactly 4-6 query variants "
                         "as standalone lines `Q1: ...` through `Q6: ...`: include the core topic, canonical English terminology, "
                         "domain aliases, a recent-review query, and a foundational-work query. Plan a recent/foundational split. "
@@ -599,6 +607,7 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     artifact_kind="report",
                     required_sections=[
                         "Research Question",
+                        "Clarified Scope",
                         "Scope",
                         "Concept Groups",
                         "Search Strategy",
@@ -616,6 +625,8 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "deepxiv",
                         "comm-lit-review",
                     ),
+                    hitl=True,
+                    checkpoint_title="Review Scope Confirmation",
                 ),
                 StageDefinition(
                     name="review_section_plan",
