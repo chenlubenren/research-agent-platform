@@ -147,7 +147,7 @@ def test_idea_routes_each_stage_to_configured_model(
 def test_kimi_k2_temperature_is_normalized(monkeypatch):
     captured_payload: dict = {}
 
-    async def capture_request(method, path, payload=None):
+    async def capture_request(method, path, payload=None, **_kwargs):
         captured_payload.update(payload or {})
         return {"choices": [{"message": {"content": "ok"}}]}
 

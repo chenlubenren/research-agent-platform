@@ -57,10 +57,23 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {config.upstream_api_key}"}
 
 
-async def _request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    url = f"{config.upstream_base_url.rstrip('/')}/{path.lstrip('/')}"
-    async with httpx.AsyncClient(timeout=config.request_timeout_seconds) as client:
-        response = await client.request(method, url, headers=_headers(), json=payload)
+async def _request(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    root = (base_url or config.upstream_base_url).rstrip("/")
+    url = f"{root}/{path.lstrip('/')}"
+    headers = _headers() if api_key is None else {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=timeout or config.request_timeout_seconds) as client:
+        response = await client.request(method, url, headers=headers, json=payload)
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
@@ -134,7 +147,7 @@ async def resolve_model(requested_model: str | None = None) -> str:
     return model_ids[0]
 
 
-async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
+async def chat_completions(payload: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
     forwarded = dict(payload)
     selected_model = await resolve_model(payload.get("model"))
     forwarded["model"] = selected_model
@@ -143,7 +156,7 @@ async def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
             selected_model,
             forwarded.get("temperature"),
         )
-    return await _request("POST", "/chat/completions", forwarded)
+    return await _request("POST", "/chat/completions", forwarded, timeout=timeout)
 
 
 def extract_text_from_message(message: Any) -> str:
@@ -170,13 +183,17 @@ async def create_chat_completion(
     *,
     model: str | None = None,
     temperature: float | None = 0.3,
+    timeout: float | None = None,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": messages}
     if model:
         payload["model"] = model
     if temperature is not None:
         payload["temperature"] = temperature
-    return await chat_completions(payload)
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    return await chat_completions(payload, timeout=timeout)
 
 
 async def generate_text(
@@ -185,18 +202,89 @@ async def generate_text(
     user_prompt: str,
     model: str | None = None,
     temperature: float | None = 0.3,
+    timeout: float | None = None,
+    max_tokens: int | None = None,
 ) -> str:
-    result = await create_chat_completion(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        model=model,
-        temperature=temperature,
-    )
-    choice = (result.get("choices") or [{}])[0]
-    message = choice.get("message") or {}
-    return extract_text_from_message(message.get("content", ""))
+    # Reasoning models starve the visible ``content`` when no budget is set (the small default
+    # cap is spent on ``reasoning_content``). Apply a generous default so the answer is emitted.
+    if max_tokens is None and config.upstream_max_output_tokens > 0:
+        max_tokens = config.upstream_max_output_tokens
+
+    async def _complete(budget: int | None) -> tuple[str, str, dict]:
+        result = await create_chat_completion(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            model=model,
+            temperature=temperature,
+            timeout=timeout,
+            max_tokens=budget,
+        )
+        choice = (result.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        text = extract_text_from_message(message.get("content", ""))
+        return text, str(choice.get("finish_reason") or ""), result
+
+    text, finish_reason, _result = await _complete(max_tokens)
+    # Long stage prompts (brief/synthesis) make GLM-class models spend the whole budget on
+    # reasoning; one retry with a doubled cap is cheaper than failing the whole workflow.
+    if not text.strip() and finish_reason == "length" and max_tokens:
+        text, finish_reason, _result = await _complete(min(int(max_tokens) * 2, 65536))
+    return text
+
+
+async def embed_texts(
+    texts: list[str],
+    *,
+    model: str | None = None,
+    timeout: float | None = None,
+    batch_size: int | None = None,
+) -> list[list[float]]:
+    """Embed ``texts`` via an OpenAI-compatible ``/embeddings`` endpoint.
+
+    Reads its own ``embedding_*`` config so the embedding provider can differ from
+    the chat provider (e.g. Aliyun/Doubao). Returns one vector per input text; raises
+    on transport/HTTP errors so the caller can decide whether to degrade gracefully.
+
+    Inputs are split into chunks of at most ``batch_size`` items (default from
+    ``config.embedding_batch_size``) because some providers (e.g. Doubao) cap the
+    number of inputs per request; vectors are re-assembled in the original order.
+    """
+
+    payload = [text if isinstance(text, str) else str(text) for text in texts]
+    if not payload:
+        return []
+    base_url = (config.embedding_base_url or config.upstream_base_url).rstrip("/")
+    api_key = config.embedding_api_key or config.upstream_api_key
+    selected_model = model or config.embedding_model
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Missing embedding API key")
+    if not selected_model:
+        raise HTTPException(status_code=500, detail="Missing EMBEDDING_MODEL")
+    chunk = max(1, batch_size or config.embedding_batch_size)
+    vectors: list[list[float]] = []
+    for start in range(0, len(payload), chunk):
+        window = payload[start : start + chunk]
+        result = await _request(
+            "POST",
+            "/embeddings",
+            {"model": selected_model, "input": window},
+            timeout=timeout,
+            base_url=base_url,
+            api_key=api_key,
+        )
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise HTTPException(status_code=502, detail="Embedding payload missing data")
+        ordered = sorted(
+            (item for item in data if isinstance(item, dict)),
+            key=lambda item: int(item.get("index", 0) or 0),
+        )
+        vectors.extend(
+            [float(value) for value in (item.get("embedding") or [])] for item in ordered
+        )
+    return vectors
 
 
 async def generate_image(

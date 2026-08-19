@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -10,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .connectors import ScholarSearchService, SeafileWorkspaceSync
+from .connectors.scholar import LiteratureBundle, PaperRecord, merge_paper_records
 from .artifacts.store import ArtifactStore
 from .config import config
 from .context import discover_pdf_sources, resolve_local_research_context
@@ -76,13 +78,42 @@ from .rebuttal import (
     rebuttal_inputs_markdown,
     resolve_rebuttal_source_config,
 )
+from .review_clarify import (
+    build_clarify_draft,
+    build_clarify_pass2,
+    clarified_scope_markdown,
+    clarify_pass1_markdown,
+    default_scope_card,
+)
+from .review_directions import (
+    build_directions_markdown,
+    directions_from_facets,
+    directions_from_json,
+    directions_to_json,
+    discover_review_directions,
+    focused_query_plan,
+    focused_scope_markdown,
+    interpret_selection,
+)
 from .review_pipeline import (
     ReviewEvidenceError,
     build_review_quality_reports,
     clean_review_topic,
+    core_backfill_queries,
+    extract_scope_artifact_names,
+    inherited_domain_arg,
+    parse_review_domains,
     parse_review_queries,
+    preprint_ratio,
+    resolve_key_source_domain,
     review_evidence_is_sufficient,
     review_quality_markdown,
+    source_health,
+)
+from .review_screening import (
+    parse_exclusion_terms,
+    screen_papers,
+    screening_gate_counts,
 )
 from .router.intent import (
     RouteDecision,
@@ -92,7 +123,40 @@ from .router.intent import (
     route_message,
 )
 from .state.store import StateStore
-from .upstream import configured_model_for_role, generate_image, generate_text
+from .upstream import configured_model_for_role, embed_texts, generate_image, generate_text
+
+
+def _recount_screen_tiers(papers: list[PaperRecord]) -> dict:
+    """Recount tier totals from the records themselves.
+
+    Needed after a supplementary retrieval round merges newly screened papers into an
+    already-screened pool, where the original per-call summary no longer covers the set.
+    """
+
+    counts = {"core": 0, "transferable": 0, "background": 0, "unscreened": 0}
+    for paper in papers:
+        if paper.screen_tier == "unscreened":
+            counts["unscreened"] += 1
+        elif paper.screen_decision == "keep" and paper.screen_tier in counts:
+            counts[paper.screen_tier] += 1
+        elif paper.screen_decision == "uncertain" and paper.screen_tier == "background":
+            counts["background"] += 1
+    counts["kept"] = sum(1 for paper in papers if paper.screen_decision == "keep")
+    counts["dropped"] = sum(1 for paper in papers if paper.screen_decision == "drop")
+    counts["uncertain"] = sum(1 for paper in papers if paper.screen_decision == "uncertain")
+    return counts
+
+
+def _discovery_fingerprint(scope_text: str, queries: list[str]) -> str:
+    """Stable digest of the inputs that determine a discovery round's result.
+
+    Re-running direction_selection with the same clarified scope and query plan should reuse
+    the persisted bundle rather than re-hit the scholarly APIs; a scope edit changes this digest
+    and forces a genuine re-run.
+    """
+
+    payload = "\u0001".join([scope_text.strip(), *[query.strip() for query in queries]])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 CLOUD_DELIVERY_SYSTEM_POLICY = (
@@ -119,6 +183,7 @@ class ResearchAgentService:
             cnki_api_key=config.cnki_api_key,
             cnki_auth_header=config.cnki_auth_header,
             cnki_auth_scheme=config.cnki_auth_scheme,
+            semantic_scholar_api_key=config.semantic_scholar_api_key,
             minimum_for_synthesis=config.review_minimum_sources,
             recommended_for_review=config.review_recommended_sources,
         )
@@ -145,9 +210,12 @@ class ResearchAgentService:
         session = await self._prepare_chat_session(session_id, message, user_id)
         session_context = self._session_context(session)
 
-        active_task = self.store.load_task(session.active_task_id) if session.active_task_id else None
-        if active_task and active_task.status == "waiting_human":
-            reply = await self._handle_waiting_task(session, active_task, message)
+        waiting_task = self._find_waiting_task(session)
+        if waiting_task is not None:
+            if session.active_task_id != waiting_task.task_id:
+                session.active_task_id = waiting_task.task_id
+                self.store.save_session(session)
+            reply = await self._handle_waiting_task(session, waiting_task, message)
         else:
             direct_reply = self._direct_chat_response("".join(message.lower().split()))
             if direct_reply is not None:
@@ -173,9 +241,12 @@ class ResearchAgentService:
         sync_workspace: bool = True,
     ) -> dict:
         session = await self._prepare_chat_session(session_id, message, user_id, sync_workspace=sync_workspace)
-        active_task = self.store.load_task(session.active_task_id) if session.active_task_id else None
-        if active_task and active_task.status == "waiting_human":
-            reply = await self._handle_waiting_task(session, active_task, message)
+        waiting_task = self._find_waiting_task(session)
+        if waiting_task is not None:
+            if session.active_task_id != waiting_task.task_id:
+                session.active_task_id = waiting_task.task_id
+                self.store.save_session(session)
+            reply = await self._handle_waiting_task(session, waiting_task, message)
         else:
             route = explicit_route(message)
             if route is None:
@@ -209,6 +280,24 @@ class ResearchAgentService:
         if not session:
             raise ValueError(f"Unknown session: {task.session_id}")
         session_context = self._session_context(session)
+
+        # A free-text reply reaching the async chat pipeline while another workflow is paused at a
+        # human checkpoint must resume that workflow, not spawn a new task. _create_chat_task has
+        # already overwritten active_task_id, so recover the suspended task by scanning the session.
+        waiting_task = self._find_waiting_task(session, exclude_task_id=task.task_id)
+        if waiting_task is not None:
+            self._log_progress(
+                task,
+                f"检测到任务 {waiting_task.task_id} 正在等待人工输入，本条消息转交该任务继续，不新建任务",
+                kind="router",
+            )
+            task.status = "completed"
+            task.current_stage_name = "redirected"
+            task.summary = f"消息已转交等待中的任务 {waiting_task.task_id} 继续。"
+            self.store.save_task(task)
+            session.active_task_id = waiting_task.task_id
+            self.store.save_session(session)
+            return await self._handle_waiting_task(session, waiting_task, task.objective)
 
         self._log_progress(task, "正在分析请求类型", kind="router")
         direct_reply = self._direct_chat_response("".join(task.objective.lower().split()))
@@ -365,6 +454,26 @@ class ResearchAgentService:
 
     def list_tasks(self, session_id: str | None = None) -> list[TaskRun]:
         return self.store.list_tasks(session_id)
+
+    def _find_waiting_task(self, session: ChatSession, *, exclude_task_id: str = "") -> TaskRun | None:
+        """The task, if any, this session has paused at a human checkpoint.
+
+        ``active_task_id`` is the fast path, but creating a follow-up chat task overwrites it and
+        orphans a suspended ``/review``; a free-text reply would then be re-routed as a brand-new
+        task and the review would hang forever. Falling back to a scan keeps a checkpoint reply
+        attached to its own workflow even after ``active_task_id`` was clobbered.
+        """
+
+        if session.active_task_id and session.active_task_id != exclude_task_id:
+            active = self.store.load_task(session.active_task_id)
+            if active and active.status == "waiting_human":
+                return active
+        for candidate in self.store.list_tasks(session.session_id):
+            if candidate.task_id == exclude_task_id:
+                continue
+            if candidate.status == "waiting_human":
+                return candidate
+        return None
 
     async def _chat_reply(self, session: ChatSession, latest_message: str | None = None) -> dict:
         latest_message = latest_message if latest_message is not None else session.history[-1].content if session.history else ""
@@ -919,6 +1028,14 @@ class ResearchAgentService:
         support_artifacts, support_context = await self._prepare_stage_support(task, stage)
         for artifact in support_artifacts:
             self._upsert_task_artifact(task, artifact)
+        if task.command == "/review" and stage.name == "clarify":
+            artifact = await self._run_review_clarify(task, stage, revision_feedback)
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
+        if task.command == "/review" and stage.name == "direction_selection":
+            artifact = await self._run_direction_selection(task, stage, revision_feedback)
+            self.artifacts._write_manifest_for_root(Path(task.artifact_root))
+            return artifact
         if task.command == "/rebuttal" and stage.name == "rebuttal_intake":
             if task.rebuttal_source is None:
                 raise RebuttalInputError("/rebuttal input SourceSet is missing.")
@@ -1308,7 +1425,641 @@ class ResearchAgentService:
             )
             return wiki_store.fallback_summary(paper, evidence_records)
 
+    def _review_embed_fn(self):
+        """Return an async embedder when a pluggable embedding provider is configured, else None."""
+
+        if not config.embedding_enabled:
+            return None
+
+        async def _embed(texts: list[str]) -> list[list[float]]:
+            return await embed_texts(texts, timeout=config.review_screen_timeout_seconds)
+
+        return _embed
+
+    async def _run_review_screening(
+        self,
+        task: TaskRun,
+        papers: list[PaperRecord],
+        *,
+        topic: str,
+        scope: str,
+        round_label: str,
+        max_candidates: int | None = None,
+    ) -> dict:
+        """Invoke the layered keep/drop screener (L1 hard-exclude -> L2 embedding rerank -> L3 LLM)."""
+
+        model = config.review_screen_model or None
+        summary = await screen_papers(
+            papers,
+            topic=topic,
+            scope=scope,
+            generate_text=generate_text,
+            model=model,
+            max_candidates=config.review_screen_max_candidates if max_candidates is None else max_candidates,
+            batch_size=config.review_screen_batch_size,
+            max_concurrency=config.review_screen_concurrency,
+            hard_exclusion_terms=parse_exclusion_terms(config.review_hard_exclusion_terms),
+            hard_relevance_floor=config.review_hard_relevance_floor,
+            embed=self._review_embed_fn(),
+            timeout=config.review_screen_timeout_seconds,
+            on_event=lambda message: self._log_progress(task, f"[{round_label}筛选] {message}", kind="retrieval"),
+        )
+        if summary.get("screened"):
+            self._log_progress(
+                task,
+                f"{round_label}分层精筛完成：core {summary.get('core', 0)} / transferable "
+                f"{summary.get('transferable', 0)} / background {summary.get('background', 0)} / "
+                f"drop {summary.get('dropped', 0)} / uncertain {summary.get('uncertain', 0)}"
+                + (f"（rerank={summary.get('rerank_mode')}）" if summary.get("rerank_mode") else ""),
+                kind="retrieval",
+            )
+        return summary
+
+    async def _backfill_core_layer(
+        self,
+        task: TaskRun,
+        bundle: LiteratureBundle,
+        *,
+        topic: str,
+        scope: str,
+        anchor_query: str,
+        screen_summary: dict,
+    ) -> dict:
+        """Re-search the artifacts the scope names when screening admitted no core evidence.
+
+        The scope reserves the core tier for public benchmarks, so ``core == 0`` means the
+        retrieval never reached them. Directions clustered from the surviving transferable
+        tier would then describe the *systems* being evaluated and silently swap the review
+        question, so the named seeds are recovered before any direction card is built.
+        """
+
+        if int(screen_summary.get("core", 0) or 0) > 0:
+            return {}
+        seeds = extract_scope_artifact_names(scope)
+        queries = core_backfill_queries(seeds, anchor_query)
+        if not queries:
+            self._log_progress(
+                task,
+                "[核心层告警] 分层筛选后 core=0，且范围卡中没有可定向补检的基准名称，"
+                "方向卡将只能由 transferable 层聚出",
+                kind="retrieval",
+            )
+            return {"seeds": [], "queries": [], "added_candidates": 0, "core_after": 0}
+        self._log_progress(
+            task,
+            f"[核心层补检] core=0，按范围卡中的 {len(queries)} 个基准名定向补检（每个专名附领域锚定词）",
+            kind="retrieval",
+        )
+        extra = await self.scholar.search_bundle(
+            topic,
+            queries=queries,
+            per_source_limit=config.scholar_results_per_source,
+            max_papers=max(24, config.review_discovery_max_papers),
+            max_queries=len(queries),
+            # Inherit *every* domain the first round resolved: the per-name queries must not be
+            # re-classified as 'general', which would switch off the round's active indexes. Using
+            # the full set (not the single coverage profile) keeps both cs and biomed sources on
+            # for a multi-domain topic during the backfill.
+            domain=inherited_domain_arg(bundle.quality.get("domains")) or None,
+            search_round="discovery",
+        )
+        before = {id(paper) for paper in bundle.papers}
+        merged = merge_paper_records([*bundle.papers, *extra.papers])
+        for index, paper in enumerate(merged, start=1):
+            paper.paper_id = f"P{index:03d}"
+        fresh = [paper for paper in merged if not paper.screen_decision]
+        added = sum(1 for paper in merged if id(paper) not in before)
+        if fresh:
+            await self._run_review_screening(
+                task,
+                fresh,
+                topic=topic,
+                scope=scope,
+                round_label="核心层补检",
+                max_candidates=config.review_screen_max_candidates,
+            )
+        bundle.papers[:] = merged
+        for name, status in extra.provider_status.items():
+            bundle.provider_status.setdefault(f"{name} (backfill)", status)
+        core_after = sum(
+            1 for paper in merged if paper.screen_decision == "keep" and paper.screen_tier == "core"
+        )
+        if core_after:
+            self._log_progress(
+                task, f"[核心层补检] 定向补检后核心层恢复 {core_after} 篇", kind="retrieval"
+            )
+        else:
+            self._log_progress(
+                task,
+                "[核心层告警] 定向补检后核心层仍为空，方向卡可能把综述问题从『基准』换成『系统』，"
+                "请在方向选择处人工干预",
+                kind="retrieval",
+            )
+        return {
+            "seeds": seeds,
+            "queries": queries,
+            "added_candidates": added,
+            "core_after": core_after,
+        }
+
+    # --- Two-round /review helpers (clarify -> discovery -> direction selection -> deep dive) ---
+
+    def _extract_markdown_section(self, path: Path, heading: str) -> str:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        match = re.search(
+            rf"(?:^|\n)#{{1,6}}\s*{re.escape(heading)}\s*\n(.*?)(?=\n#{{1,6}}\s|\Z)",
+            text,
+            re.S,
+        )
+        return match.group(1).strip() if match else ""
+
+    def _review_read_clarified_scope(self, workspace_root: Path) -> str:
+        return self._extract_markdown_section(
+            workspace_root / "bib" / "SCOPE_CLARIFICATION.md", "Clarified Scope"
+        )
+
+    def _review_read_focused_scope(self, workspace_root: Path) -> str:
+        return self._extract_markdown_section(
+            workspace_root / "bib" / "RESEARCH_DIRECTIONS.md", "Focused Retrieval Scope"
+        )
+
+    def _paper_from_dict(self, data: dict) -> PaperRecord:
+        allowed = set(PaperRecord.__dataclass_fields__.keys())
+        return PaperRecord(**{key: value for key, value in data.items() if key in allowed})
+
+    def _review_load_discovery_bundle(self, workspace_root: Path) -> LiteratureBundle | None:
+        path = workspace_root / "bib" / "LITERATURE_SEARCH.discovery.json"
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return None
+        papers = [self._paper_from_dict(item) for item in payload.get("papers", []) if isinstance(item, dict)]
+        return LiteratureBundle(
+            query=str(payload.get("query", "")),
+            queries=list(payload.get("queries", [])),
+            papers=papers,
+            provider_status=dict(payload.get("provider_status", {})),
+            excluded_count=int(payload.get("excluded_count", 0) or 0),
+            quality=dict(payload.get("quality", {}) or {}),
+        )
+
+    def _review_load_directions(self, workspace_root: Path) -> tuple[list, dict, bool]:
+        default_meta = {"mode": "focused", "selected_ids": [], "custom_text": ""}
+        path = workspace_root / "bib" / "RESEARCH_DIRECTIONS.json"
+        if not path.exists():
+            return [], default_meta, False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return [], default_meta, False
+        directions = directions_from_json(payload.get("directions"))
+        scope_meta = payload.get("scope_meta") or {
+            "mode": "focused",
+            "selected_ids": payload.get("recommended", []),
+            "custom_text": "",
+        }
+        return directions, scope_meta, scope_meta.get("mode") == "panorama"
+
+    def _track_review_side_artifacts(self, task: TaskRun, artifacts: list) -> None:
+        tracked = {artifact.relative_path for artifact in artifacts}
+        task.artifacts = [artifact for artifact in task.artifacts if artifact.relative_path not in tracked]
+        task.artifacts.extend(artifacts)
+
+    async def _run_review_clarify(self, task: TaskRun, stage: StageDefinition, feedback: str):
+        workspace_root = Path(task.artifact_root)
+        topic = clean_review_topic(task.objective)
+        model = config.review_screen_model or None
+        if not feedback.strip():
+            self._archive_previous_review_outputs(workspace_root, task.task_id)
+            if config.review_clarify_enabled:
+                questions, scope_card = await build_clarify_draft(
+                    topic, generate_text=generate_text, model=model
+                )
+            else:
+                questions, scope_card = [], default_scope_card(topic)
+            if config.review_clarify_enabled and config.enable_hitl:
+                content = clarify_pass1_markdown(topic, questions, scope_card)
+            else:
+                content = (
+                    f"# Scope Clarification\n\n- Topic: {topic}\n\n" + clarified_scope_markdown(scope_card)
+                )
+        else:
+            prior_text = self._file_excerpt(str(workspace_root / "bib" / "SCOPE_CLARIFICATION.md"), 12000)
+            content = await build_clarify_pass2(
+                topic, feedback=feedback, prior_text=prior_text, generate_text=generate_text, model=model
+            )
+        return self._write_text(
+            task,
+            stage.artifact_path,
+            content,
+            kind=stage.artifact_kind,
+            description="Review scope clarification.",
+        )
+
+    async def _run_direction_selection(self, task: TaskRun, stage: StageDefinition, feedback: str):
+        topic = clean_review_topic(task.objective)
+        if feedback.strip():
+            return await self._direction_selection_pass2(task, stage, topic, feedback)
+        workspace_root = Path(task.artifact_root)
+        model = config.review_screen_model or None
+        research_brief = self._file_excerpt(str(workspace_root / "bib" / "RESEARCH_BRIEF.md"), 12000)
+        discovery_queries = parse_review_queries(task.objective, research_brief)
+        # LLM-classified domains piggybacked on the brief (read from the full, often Chinese,
+        # clarified scope). Passed as a hint; _resolve_domains unions it with the keyword scan,
+        # so it can only add source families (e.g. keep Europe PMC/PMC on for a clinical topic
+        # whose English queries otherwise read as pure cs), never remove one.
+        brief_domains = parse_review_domains(research_brief or "")
+        brief_domain_hint = " ".join(brief_domains)
+        scope_text = self._review_read_clarified_scope(workspace_root) or (research_brief or topic).strip()
+        # Always seed discovery with the benchmark names the clarified scope enumerates, so a
+        # generically-worded brief still pulls the named artifacts into the pool. A keyword API
+        # only returns a benchmark's own paper when the query names it; leaving this to the
+        # brief's wording made recall of the seeds swing between runs (core 8 vs core 2). This
+        # is the always-on counterpart to the core==0 emergency backfill.
+        seed_names = extract_scope_artifact_names(scope_text, research_brief or "")
+        name_queries = core_backfill_queries(
+            seed_names, discovery_queries[0] if discovery_queries else topic
+        )
+        if name_queries:
+            discovery_queries = list(dict.fromkeys([*discovery_queries, *name_queries]))
+            self._log_progress(
+                task,
+                f"[发现轮] 已按范围卡中的 {len(name_queries)} 个基准名注入定向查询（每个专名附领域锚定词）",
+                kind="retrieval",
+            )
+        # Re-entering direction_selection with empty feedback (e.g. a checkpoint rejected without
+        # a real selection) used to re-run the whole discovery retrieval. Reuse the persisted
+        # discovery bundle when the clarified scope and query plan are unchanged; a scope edit via
+        # the clarify checkpoint changes the fingerprint and correctly forces a fresh round.
+        scope_fingerprint = _discovery_fingerprint(scope_text, discovery_queries)
+        cached_bundle = self._review_load_discovery_bundle(workspace_root)
+        reuse_discovery = (
+            cached_bundle is not None
+            and bool(cached_bundle.papers)
+            and str(cached_bundle.quality.get("scope_fingerprint", "")) == scope_fingerprint
+        )
+        if reuse_discovery:
+            bundle = cached_bundle
+            screened = bool(bundle.quality.get("screened", False))
+            self._log_progress(
+                task,
+                "[发现轮] 范围与查询计划未变，复用上一轮检索与筛选结果，跳过重复检索",
+                kind="retrieval",
+            )
+        else:
+            self._log_progress(task, "正在执行第一轮探索性广泛检索", kind="retrieval")
+            if brief_domains:
+                self._log_progress(
+                    task,
+                    f"[发现轮] 研究简报判定领域 {', '.join(brief_domains)}，"
+                    "已并入源激活（与关键词分类取并集，只增不减源）",
+                    kind="retrieval",
+                )
+            bundle = await self.scholar.search_bundle(
+                topic,
+                queries=discovery_queries,
+                per_source_limit=config.scholar_results_per_source,
+                max_papers=max(24, config.review_discovery_max_papers),
+                max_queries=max(config.review_query_limit, len(discovery_queries)),
+                domain=brief_domain_hint or None,
+                search_round="discovery",
+            )
+            screened = False
+            screen_summary: dict = {}
+            if config.review_screening_enabled:
+                screen_summary = await self._run_review_screening(
+                    task,
+                    bundle.papers,
+                    topic=topic,
+                    scope=scope_text,
+                    round_label="探索轮",
+                    max_candidates=config.review_screen_max_candidates,
+                )
+                screened = bool(screen_summary.get("screened", False))
+            core_backfill: dict = {}
+            if screened:
+                core_backfill = await self._backfill_core_layer(
+                    task,
+                    bundle,
+                    topic=topic,
+                    scope=scope_text,
+                    anchor_query=(discovery_queries[0] if discovery_queries else topic),
+                    screen_summary=screen_summary,
+                )
+                if core_backfill:
+                    screen_summary = {
+                        **screen_summary,
+                        **_recount_screen_tiers(bundle.papers),
+                    }
+            relevant, traceable = screening_gate_counts(bundle.papers, screened=screened)
+            bundle.quality.update(
+                {
+                    "relevant_count": relevant,
+                    "traceable_count": traceable,
+                    "screened": screened,
+                    "search_round": "discovery",
+                    "screen_error": screen_summary.get("screen_error", ""),
+                    "screen_tiers": {
+                        "core": screen_summary.get("core", 0),
+                        "transferable": screen_summary.get("transferable", 0),
+                        "background": screen_summary.get("background", 0),
+                        "uncertain": screen_summary.get("uncertain", 0),
+                        "unscreened": screen_summary.get("unscreened", 0),
+                    },
+                    "rerank_mode": screen_summary.get("rerank_mode", ""),
+                }
+            )
+            if core_backfill:
+                bundle.quality["core_backfill"] = core_backfill
+            # The discovery round used to skip this entirely, so a provider that failed every
+            # query was reported as 'Coverage state: unknown' and raised no degradation alarm.
+            discovery_health = source_health(
+                bundle.provider_status,
+                domain=resolve_key_source_domain(bundle.quality.get("domains")),
+            )
+            bundle.quality["source_health"] = discovery_health
+            bundle.quality["coverage_state"] = discovery_health["coverage_state"]
+            bundle.quality["preprint_ratio"] = preprint_ratio(bundle)
+            bundle.quality["scope_fingerprint"] = scope_fingerprint
+            if discovery_health["coverage_state"] == "degraded":
+                self._log_progress(
+                    task,
+                    "[覆盖告警] 第一轮关键索引未全部健康："
+                    f"degraded={', '.join(discovery_health['degraded_sources']) or 'none'}; "
+                    f"domain-gated-off={', '.join(discovery_health['domain_gated_sources']) or 'none'}",
+                    kind="retrieval",
+                )
+        # Discover directions first so paper.direction_ids are annotated before the
+        # discovery bundle is serialized (the deep-dive round reloads that provenance).
+        directions: list = []
+        recommended: list = []
+        fallback_used = False
+        if config.review_direction_selection_enabled:
+            directions, recommended = await discover_review_directions(
+                bundle.papers,
+                topic=topic,
+                scope=scope_text,
+                generate_text=generate_text,
+                model=model,
+                max_candidates=config.review_direction_max_candidates,
+                max_directions=config.review_direction_count,
+                min_papers=config.review_direction_min_papers,
+                timeout=config.review_screen_timeout_seconds,
+                on_event=lambda message: self._log_progress(task, f"[方向发现] {message}", kind="retrieval"),
+            )
+        if not directions:
+            directions, recommended = directions_from_facets(
+                bundle.papers,
+                max_directions=config.review_direction_count,
+                min_papers=config.review_direction_min_papers,
+            )
+            fallback_used = True
+        discovery_artifacts = [
+            self._write_text(
+                task,
+                "bib/LITERATURE_SEARCH.discovery.md",
+                bundle.to_markdown(),
+                kind="note",
+                description="First-round (discovery) scholarly search results.",
+            ),
+            self._write_text(
+                task,
+                "bib/LITERATURE_SEARCH.discovery.json",
+                bundle.to_json(),
+                kind="note",
+                description="First-round (discovery) structured retrieval records.",
+            ),
+            self._write_text(
+                task,
+                "bib/RETRIEVAL_QUALITY.discovery.md",
+                review_quality_markdown(bundle, local_sources=[], local_candidates=[]),
+                kind="review",
+                description="First-round discovery retrieval quality (soft discovery gate, non-blocking).",
+            ),
+        ]
+        scope_meta = {"mode": "focused", "selected_ids": recommended, "custom_text": ""}
+        persist = {
+            "topic": topic,
+            "directions": directions_to_json(directions),
+            "recommended": recommended,
+            "scope_meta": scope_meta,
+            "fallback_used": fallback_used,
+        }
+        directions_json = self._write_text(
+            task,
+            "bib/RESEARCH_DIRECTIONS.json",
+            json.dumps(persist, ensure_ascii=False, indent=2),
+            kind="manifest",
+            description="Discovered research directions and current selection state.",
+        )
+        if config.review_direction_selection_enabled and config.enable_hitl:
+            content = build_directions_markdown(
+                directions,
+                recommended,
+                topic=topic,
+                fallback_used=fallback_used,
+                core_count=int(bundle.quality.get("screen_tiers", {}).get("core", 0) or 0)
+                if screened
+                else None,
+                coverage_state=str(bundle.quality.get("coverage_state", "")),
+            )
+        else:
+            content = "# Research Directions\n\n- Topic: " + topic + "\n\n" + focused_scope_markdown(
+                directions, topic=topic, selected_ids=recommended, mode="focused"
+            )
+        self._log_progress(
+            task,
+            f"方向发现完成：{len(directions)} 个方向（{'查询分面回退' if fallback_used else 'LLM 聚类'}）",
+            kind="retrieval",
+        )
+        self._track_review_side_artifacts(task, [*discovery_artifacts, directions_json])
+        return self._write_text(
+            task,
+            stage.artifact_path,
+            content,
+            kind=stage.artifact_kind,
+            description="Research direction discovery and selection.",
+        )
+
+    async def _direction_selection_pass2(self, task: TaskRun, stage: StageDefinition, topic: str, feedback: str):
+        workspace_root = Path(task.artifact_root)
+        directions, _prev_meta, _panorama = self._review_load_directions(workspace_root)
+        selection = interpret_selection(feedback, directions)
+        scope_md = focused_scope_markdown(
+            directions,
+            topic=topic,
+            selected_ids=selection["selected_ids"],
+            mode=selection["mode"],
+            custom_text=selection["custom_text"],
+        )
+        summary_line = ", ".join(selection["selected_ids"]) or selection["custom_text"] or "(recommended)"
+        content = (
+            f"# Research Directions\n\n- Topic: {topic}\n- Selection: {selection['mode']} {summary_line}\n\n"
+            + scope_md
+        )
+        path = workspace_root / "bib" / "RESEARCH_DIRECTIONS.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (ValueError, OSError):
+            payload = {}
+        payload["scope_meta"] = selection
+        directions_json = self._write_text(
+            task,
+            "bib/RESEARCH_DIRECTIONS.json",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            kind="manifest",
+            description="Discovered research directions and current selection state.",
+        )
+        self._track_review_side_artifacts(task, [directions_json])
+        return self._write_text(
+            task,
+            stage.artifact_path,
+            content,
+            kind=stage.artifact_kind,
+            description="Research direction selection.",
+        )
+
+    async def _build_focused_bundle(self, task: TaskRun, topic: str, discovery_queries: list[str]) -> LiteratureBundle:
+        workspace_root = Path(task.artifact_root)
+        directions, scope_meta, panorama = self._review_load_directions(workspace_root)
+        discovery_bundle = self._review_load_discovery_bundle(workspace_root)
+        discovery_papers = discovery_bundle.papers if discovery_bundle else []
+        scope_text = self._review_read_focused_scope(workspace_root) or (
+            self._file_excerpt(str(workspace_root / "bib" / "RESEARCH_BRIEF.md"), 12000) or topic
+        ).strip()
+        model = config.review_screen_model or None
+        mode = scope_meta.get("mode", "focused")
+        if mode == "panorama" or panorama:
+            self._log_progress(task, "全景模式：沿用第一轮保留文献，跳过第二轮定向检索", kind="retrieval")
+            working = [p for p in discovery_papers if p.screen_decision != "drop"] or list(discovery_papers)
+            provider_status = discovery_bundle.provider_status if discovery_bundle else {}
+            queries_used = discovery_bundle.queries if discovery_bundle else discovery_queries
+        else:
+            selected_ids = set(scope_meta.get("selected_ids", []))
+            selected_discovery = [
+                p
+                for p in discovery_papers
+                if p.screen_decision != "drop" and (not selected_ids or selected_ids.intersection(p.direction_ids))
+            ]
+            if not selected_discovery:
+                selected_discovery = [p for p in discovery_papers if p.screen_decision != "drop"]
+            focused_queries = focused_query_plan(
+                scope_meta,
+                directions,
+                topic=topic,
+                limit=config.review_focused_query_limit,
+                papers=discovery_papers,
+                discovery_queries=discovery_queries,
+            ) or discovery_queries
+            self._log_progress(task, "正在执行第二轮定向深度检索", kind="retrieval")
+            # Inherit the domains the discovery round resolved so the focused round keeps the same
+            # source families active. Without a hint the focused round classified only its
+            # (method-heavy, English) focused_queries and could silently drop the clinical indexes
+            # a biomedical topic needs, or the arXiv/DBLP a cs topic needs.
+            focused_domain_hint = inherited_domain_arg(
+                discovery_bundle.quality.get("domains") if discovery_bundle else None
+            )
+            round2 = await self.scholar.search_bundle(
+                topic,
+                queries=focused_queries,
+                per_source_limit=config.scholar_results_per_source,
+                max_papers=config.review_focused_max_papers,
+                max_queries=config.review_focused_query_limit,
+                domain=focused_domain_hint or None,
+                search_round="focused",
+            )
+            working = merge_paper_records([*selected_discovery, *round2.papers])
+            working.sort(key=lambda item: item.relevance_score, reverse=True)
+            working = working[: config.review_focused_max_papers]
+            provider_status = round2.provider_status
+            queries_used = focused_queries
+        for index, paper in enumerate(working, start=1):
+            paper.paper_id = f"P{index:03d}"
+        screened = False
+        screen_summary: dict = {}
+        if config.review_screening_enabled and working:
+            screen_summary = await self._run_review_screening(
+                task,
+                working,
+                topic=topic,
+                scope=scope_text,
+                round_label="深挖轮",
+                max_candidates=config.review_focused_screen_max_candidates,
+            )
+            screened = bool(screen_summary.get("screened", False))
+        # Order kept papers by screening tier so the capped PDF download prioritizes core work.
+        tier_rank = {"core": 0, "transferable": 1, "background": 2, "unscreened": 4, "": 5, "exclude": 9}
+        working.sort(
+            key=lambda paper: (
+                0 if paper.screen_decision != "drop" else 1,
+                tier_rank.get(paper.screen_tier, 5),
+                -paper.relevance_score,
+            )
+        )
+        for index, paper in enumerate(working, start=1):
+            paper.paper_id = f"P{index:03d}"
+        relevant, traceable = screening_gate_counts(working, screened=screened)
+        dropped = sum(1 for paper in working if paper.screen_decision == "drop")
+        quality = {
+            "status": "adequate"
+            if relevant >= config.review_recommended_sources
+            else "marginal"
+            if relevant >= config.review_minimum_sources
+            else "insufficient",
+            "mode": "panorama" if (mode == "panorama" or panorama) else "focused",
+            "selected_directions": sorted(scope_meta.get("selected_ids", [])),
+            "candidate_count": len(working),
+            "eligible_count": relevant,
+            "relevant_count": relevant,
+            "traceable_count": traceable,
+            "truncated_count": 0,
+            "screened": screened,
+            "screen_error": screen_summary.get("screen_error", ""),
+            "screen_tiers": {
+                "core": screen_summary.get("core", 0),
+                "transferable": screen_summary.get("transferable", 0),
+                "background": screen_summary.get("background", 0),
+                "uncertain": screen_summary.get("uncertain", 0),
+                "unscreened": screen_summary.get("unscreened", 0),
+            },
+            "rerank_mode": screen_summary.get("rerank_mode", ""),
+            "minimum_for_synthesis": config.review_minimum_sources,
+            "recommended_for_review": config.review_recommended_sources,
+            "provider_success_count": sum(
+                str(status).startswith("ok") for status in provider_status.values()
+            ),
+        }
+        # Judge the deep-dive round against the domain the *discovery* round resolved.
+        # Without it the focused round is scored against the backbone list only, so arXiv
+        # and DBLP being switched off by proper-noun queries never showed up as degraded.
+        health = source_health(
+            provider_status,
+            domain=resolve_key_source_domain(
+                (discovery_bundle.quality.get("domains") if discovery_bundle else None)
+            ),
+        )
+        quality["source_health"] = health
+        quality["coverage_state"] = health["coverage_state"]
+        bundle = LiteratureBundle(
+            query=topic,
+            queries=queries_used,
+            papers=working,
+            provider_status=provider_status,
+            excluded_count=dropped,
+            quality=quality,
+        )
+        quality["preprint_ratio"] = preprint_ratio(bundle)
+        return bundle
+
     async def _prepare_review_support(self, task: TaskRun, stage: StageDefinition) -> tuple[list, str]:
+        # clarify and direction_selection are produced deterministically in _execute_stage
+        # (scope Q&A / first-round retrieval + direction discovery); no LLM prompt support needed.
+        if stage.name in {"clarify", "direction_selection"}:
+            return [], ""
         workspace_root = Path(task.artifact_root)
         local_refs = self._review_local_source_refs(workspace_root)
         local_records = collect_paper_evidence(workspace_root, local_refs, total_limit=18000)
@@ -1317,12 +2068,24 @@ class ResearchAgentService:
             self._filter_review_local_records(local_records, [topic])
         )
         if stage.name == "research_brief":
-            self._archive_previous_review_outputs(workspace_root, task.task_id)
+            clarified_scope = self._review_read_clarified_scope(workspace_root)
             context = (
                 "Review retrieval protocol: define 4-6 query variants as lines formatted exactly `Q1: ...`, `Q2: ...`. "
-                "Include the cleaned core topic, canonical English terms, domain aliases, one recent-review query, and one "
-                "foundational query. Do not claim that external retrieval has already succeeded.\n\n"
+                "Use space-separated keyword strings (not boolean syntax). Include the cleaned core topic, canonical "
+                "English terms, Chinese variants, domain aliases, one recent-review query, and one foundational query. "
+                "Do not claim that external retrieval has already succeeded. Do not claim citation snowballing.\n\n"
+                "Source Coverage must list ONLY these actually wired providers (omit any not named here): "
+                "OpenAlex, Crossref, Semantic Scholar; domain-gated extras arXiv and DBLP (cs) or Europe PMC and PMC "
+                "(biomed). Optional sources CORE/OpenAIRE/BASE/Zenodo/HAL/WoS/CNKI are disabled unless configured. "
+                "Do not mention Papers with Code, Hugging Face Datasets, Wanfang, ChinaXiv, Google Patents, or DeepXiv.\n\n"
+                "Also add exactly one line formatted `Domains: cs, biomed` that lists every research domain whose "
+                "literature must be searched, chosen ONLY from this closed set: cs, biomed, physics_math. Judge from "
+                "the scope's intent, not just method words: a topic that applies machine learning / deep learning to a "
+                "clinical, medical, physiological-signal, patient, or health subject is BOTH cs and biomed, so it must "
+                "list both. Use physics_math only for physics or mathematics subjects. Emit this line verbatim once.\n\n"
             )
+            if clarified_scope:
+                context += "Confirmed scope from clarification:\n" + clarified_scope + "\n\n"
             if local_context:
                 context += local_context
             return [], context
@@ -1339,13 +2102,8 @@ class ResearchAgentService:
         local_evidence_refs = sorted({str(record["source_path"]) for record in local_records})
         local_context = self._review_local_context(local_records)
         if stage.name == "literature_synthesis":
-            self._log_progress(task, "正在执行多查询、多来源文献检索", kind="retrieval")
-            bundle = await self.scholar.search_bundle(
-                topic,
-                queries=queries,
-                per_source_limit=config.scholar_results_per_source,
-                max_papers=24,
-            )
+            self._log_progress(task, "正在按已确认方向执行第二轮定向深挖检索", kind="retrieval")
+            bundle = await self._build_focused_bundle(task, topic, queries)
             self._log_progress(
                 task,
                 f"文献检索完成：保留 {len(bundle.papers)} 篇，排除 {bundle.excluded_count} 个弱相关候选",
@@ -1537,7 +2295,13 @@ class ResearchAgentService:
 
     def _archive_previous_review_outputs(self, workspace_root: Path, task_id: str) -> None:
         review_outputs = (
+            "SCOPE_CLARIFICATION.md",
             "RESEARCH_BRIEF.md",
+            "RESEARCH_DIRECTIONS.md",
+            "RESEARCH_DIRECTIONS.json",
+            "LITERATURE_SEARCH.discovery.md",
+            "LITERATURE_SEARCH.discovery.json",
+            "RETRIEVAL_QUALITY.discovery.md",
             "LITERATURE_SEARCH.md",
             "LITERATURE_SEARCH.json",
             "LITERATURE_DOWNLOADS.json",

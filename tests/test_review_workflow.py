@@ -5,9 +5,21 @@ from pathlib import Path
 
 from research_agent_platform import agent as agent_module
 from research_agent_platform.agent import ResearchAgentService
+from research_agent_platform.config import config
 from research_agent_platform.connectors.scholar import LiteratureBundle, PaperRecord
 
 from .conftest import run
+
+
+def _disable_review_pauses(monkeypatch) -> None:
+    # These legacy end-to-end tests exercise the retrieval/gate path, not the two
+    # human-in-the-loop stages; run them non-interactively so no checkpoint pauses.
+    monkeypatch.setattr(config, "review_clarify_enabled", False)
+    monkeypatch.setattr(config, "review_direction_selection_enabled", False)
+    # Pin the source-count gate so the assertions stay deterministic regardless of any
+    # local .env override (e.g. REVIEW_MINIMUM_SOURCES tuned for production runs).
+    monkeypatch.setattr(config, "review_minimum_sources", 10)
+    monkeypatch.setattr(config, "review_recommended_sources", 15)
 
 
 def _bundle(query: str, count: int) -> LiteratureBundle:
@@ -50,6 +62,8 @@ def test_review_stops_before_synthesis_when_evidence_is_insufficient(
     service: ResearchAgentService,
     monkeypatch,
 ) -> None:
+    _disable_review_pauses(monkeypatch)
+
     async def insufficient(query, **_kwargs):
         return _bundle(query, 2)
 
@@ -73,6 +87,8 @@ def test_nine_traceable_sources_do_not_satisfy_ten_source_gate(
     service: ResearchAgentService,
     monkeypatch,
 ) -> None:
+    _disable_review_pauses(monkeypatch)
+
     async def insufficient(query, **_kwargs):
         return _bundle(query, 9)
 
@@ -92,6 +108,8 @@ def test_review_completes_with_stable_id_audit(
     service: ResearchAgentService,
     monkeypatch,
 ) -> None:
+    _disable_review_pauses(monkeypatch)
+
     async def review_text(*, system_prompt, user_prompt, model=None, temperature=0.3):
         if "Current stage: Research Brief" in user_prompt:
             return "# Brief\n\n## Search Strategy\nQ1: sponge city\nQ2: green stormwater infrastructure review"
@@ -120,6 +138,7 @@ def test_ten_extracted_local_papers_can_satisfy_review_gate(
     service: ResearchAgentService,
     monkeypatch,
 ) -> None:
+    _disable_review_pauses(monkeypatch)
     session = service.store.create_session()
     uploads = Path(session.workspace_root, "paper", "uploads")
     uploads.mkdir(parents=True, exist_ok=True)
@@ -156,6 +175,7 @@ def test_new_review_archives_previous_outputs_before_failed_retrieval(
     service: ResearchAgentService,
     monkeypatch,
 ) -> None:
+    _disable_review_pauses(monkeypatch)
     first = run(service.chat(None, "/review sponge city"))
     first_task = service.get_task(first["task_id"])
     assert first_task is not None

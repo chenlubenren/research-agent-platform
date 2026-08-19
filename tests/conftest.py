@@ -138,6 +138,7 @@ def isolated_env(tmp_path, monkeypatch):
         queries=None,
         per_source_limit=8,
         max_papers=24,
+        **_kwargs,
     ):
         papers = [
             PaperRecord(
