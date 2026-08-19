@@ -539,15 +539,34 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
             description="Search, organize, and synthesize literature evidence for idea discovery and research planning.",
             stage_definitions=[
                 StageDefinition(
+                    name="clarify",
+                    title="Scope Clarification",
+                    instruction=(
+                        "Converge the user's topic into a searchable scope before any retrieval. Ask 3-6 topic-adaptive "
+                        "clarifying questions (research object and concept boundary, core questions, time range, key "
+                        "methods/scenarios, language/source/type, inclusion and exclusion) and record a default retrieval "
+                        "scope card. This stage's artifact is produced deterministically and pauses for user confirmation."
+                    ),
+                    artifact_path="bib/SCOPE_CLARIFICATION.md",
+                    artifact_kind="report",
+                    required_sections=["Clarified Scope"],
+                    hitl=True,
+                    checkpoint_title="确认综述范围",
+                ),
+                StageDefinition(
                     name="research_brief",
                     title="Research Brief",
                     instruction=(
-                        "Turn the user's request into a bounded, reproducible retrieval protocol before any external search. "
-                        "Define the research question, review type, technical concept groups, time range, publication policy, "
-                        "and explicit inclusion/exclusion criteria. Under Search Strategy, provide exactly 4-6 query variants "
-                        "as standalone lines `Q1: ...` through `Q6: ...`: include the core topic, canonical English terminology, "
-                        "domain aliases, a recent-review query, and a foundational-work query. Plan a recent/foundational split. "
-                        "Do not claim retrieval coverage or provider success before the search has run."
+                        "Discovery mode: turn the confirmed `## Clarified Scope` into a bounded, reproducible first-round "
+                        "retrieval protocol whose goal is to map the whole field (favor recall over precision). Define the "
+                        "research question, review type, technical concept groups, time range, publication policy, and explicit "
+                        "inclusion/exclusion criteria. Under Search Strategy, provide exactly 4-6 query variants as standalone "
+                        "lines `Q1: ...` through `Q6: ...` using space-separated keywords (not boolean syntax): include the core "
+                        "topic, canonical English terminology, Chinese variants, domain aliases, a recent-review query, and a "
+                        "foundational-work query. Plan a recent/foundational split. "
+                        "Under Source Coverage, list ONLY the providers named in the support context as actually available; "
+                        "do not mention Papers with Code, Hugging Face, CNKI/Wanfang/ChinaXiv unless listed, patents, DeepXiv, "
+                        "or citation snowballing. Do not claim retrieval coverage or provider success before the search has run."
                     ),
                     artifact_path="bib/RESEARCH_BRIEF.md",
                     artifact_kind="report",
@@ -570,6 +589,21 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                         "deepxiv",
                         "comm-lit-review",
                     ),
+                ),
+                StageDefinition(
+                    name="direction_selection",
+                    title="Research Direction Selection",
+                    instruction=(
+                        "Run the first (discovery) retrieval round, then cluster the actually retrieved papers into 3-5 "
+                        "evidence-backed research directions and let the user pick one or more to deep-dive (or keep a panorama "
+                        "review). Every direction must be grounded in real retrieved paper ids. This stage's artifact is produced "
+                        "deterministically, writes a default `## Focused Retrieval Scope`, and pauses for the user's selection."
+                    ),
+                    artifact_path="bib/RESEARCH_DIRECTIONS.md",
+                    artifact_kind="report",
+                    required_sections=["Focused Retrieval Scope"],
+                    hitl=True,
+                    checkpoint_title="选择文献深挖方向",
                 ),
                 StageDefinition(
                     name="literature_synthesis",

@@ -72,6 +72,10 @@ def test_stage_prompt_enforces_session_workspace_boundary(
         return "# Research artifact\n\n- Session-scoped output."
 
     monkeypatch.setattr(agent_module, "generate_text", capture_prompt)
+    # This scenario verifies stage-prompt workspace boundaries across a full /review run;
+    # the two HITL pauses are covered separately, so run it non-interactively.
+    monkeypatch.setattr(agent_module.config, "review_clarify_enabled", False)
+    monkeypatch.setattr(agent_module.config, "review_direction_selection_enabled", False)
     session = service.store.create_session()
     result = run(service.chat(session.session_id, "/review 海绵城市"))
     completed = service.get_task(result["task_id"])

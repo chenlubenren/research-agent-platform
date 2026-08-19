@@ -19,7 +19,9 @@ def test_reorganized_workflow_boundaries():
     workflows = workflow_registry()
 
     assert [stage.name for stage in workflows["/review"].stage_definitions] == [
+        "clarify",
         "research_brief",
+        "direction_selection",
         "literature_synthesis",
         "evidence_map",
         "research_gaps",
