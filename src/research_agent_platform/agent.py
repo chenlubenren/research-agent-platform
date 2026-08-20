@@ -306,6 +306,23 @@ class ResearchAgentService:
             cnki_api_key=config.cnki_api_key,
             cnki_auth_header=config.cnki_auth_header,
             cnki_auth_scheme=config.cnki_auth_scheme,
+            semantic_scholar_api_key=config.semantic_scholar_api_key,
+            crossref_enabled=config.crossref_enabled,
+            crossref_mailto=config.crossref_mailto,
+            dblp_enabled=config.dblp_enabled,
+            europepmc_enabled=config.europepmc_enabled,
+            europepmc_email=config.europepmc_email,
+            pmc_enabled=config.pmc_enabled,
+            ncbi_email=config.ncbi_email,
+            core_enabled=config.core_enabled,
+            core_api_key=config.core_api_key,
+            openaire_enabled=config.openaire_enabled,
+            openaire_api_key=config.openaire_api_key,
+            base_enabled=config.base_enabled,
+            zenodo_enabled=config.zenodo_enabled,
+            zenodo_access_token=config.zenodo_access_token,
+            hal_enabled=config.hal_enabled,
+            domain_map=config.scholar_domain_map,
             minimum_for_synthesis=config.review_minimum_sources,
             recommended_for_review=config.review_recommended_sources,
         )
@@ -2158,7 +2175,9 @@ class ResearchAgentService:
                 limit=config.review_download_limit,
                 max_mb=config.review_download_max_mb,
                 timeout_seconds=config.review_download_timeout_seconds,
+                unpaywall_email=config.unpaywall_email,
                 write_file=write_download,
+                concurrency=config.review_download_concurrency,
             )
             download_counts = download_manifest.get("counts", {})
             self._log_progress(
