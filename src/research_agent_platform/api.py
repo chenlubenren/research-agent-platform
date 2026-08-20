@@ -290,6 +290,13 @@ CHAT_PAGE = """<!doctype html>
         linksWrap.appendChild(link);
       }
       if (linksWrap.childElementCount) block.appendChild(linksWrap);
+      const directUrl = cloud.preview_url || cloud.download_url || cloud.share_url;
+      if (directUrl) {
+        const direct = document.createElement("div");
+        direct.className = "cloud-direct-url";
+        direct.textContent = `网盘链接：${directUrl}`;
+        block.appendChild(direct);
+      }
       chat.scrollTop = chat.scrollHeight;
     }
 
@@ -371,7 +378,10 @@ CHAT_PAGE = """<!doctype html>
         uploadStatus.textContent = "";
         statusEl.textContent = "就绪";
         renderCloudWorkspace(data.cloud_workspace || {});
-        renderMessage("assistant", `新会话已创建：${data.session_id}`);
+        const cloudUrl = (data.cloud_workspace || {}).preview_url || (data.cloud_workspace || {}).download_url || (data.cloud_workspace || {}).share_url || "";
+        renderMessage("assistant", cloudUrl
+          ? `新会话已创建：${data.session_id}\n清华网盘工作区链接：${cloudUrl}`
+          : `新会话已创建：${data.session_id}`);
         prompt.focus();
       } catch (error) {
         renderMessage("assistant", String(error.message || error));
