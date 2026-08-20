@@ -38,6 +38,8 @@ def configured_model_for_role(role: str) -> str | None:
         "idea_generator": config.idea_generator_model,
         "idea_critic": config.idea_critic_model,
         "idea_finalizer": config.idea_final_model,
+        "review": config.upstream_review_model,
+        "meta_review": config.upstream_review_model,
     }
     return role_models.get(role, "") or config.upstream_model or None
 
@@ -72,8 +74,13 @@ async def _request(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    async with httpx.AsyncClient(timeout=timeout or config.request_timeout_seconds) as client:
-        response = await client.request(method, url, headers=headers, json=payload)
+    response: httpx.Response | None = None
+    for attempt in range(3 if method.upper() in {"GET", "HEAD", "OPTIONS"} else 1):
+        async with httpx.AsyncClient(timeout=timeout or config.request_timeout_seconds) as client:
+            response = await client.request(method, url, headers=headers, json=payload)
+        if response.status_code not in {502, 503, 504} or attempt == 2:
+            break
+    assert response is not None
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
