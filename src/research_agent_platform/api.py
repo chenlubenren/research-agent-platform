@@ -706,6 +706,33 @@ FIRST_TURN_INTRO = (
     "你的问题已经接收到，请等待回复。"
 )
 BACKGROUND_ACK = "已经接收到您的请求，后台正在工作，请稍后..."
+TEXT_FIRST_TURN_INTRO = (
+    "你好，我是科研智能体 Research Agent，专注于文献梳理、选题发现、实验规划、"
+    "论文写作、审稿回复和科研资料整理。你可以直接用文字描述需求，也可以使用 /review、"
+    "/idea、/plan、/code、/write、/rebuttal、/fig、/present 或 /wiki。"
+)
+
+
+def _cloud_workspace_url(session: Any) -> str:
+    """Return only a public Seafile URL for text-only API clients."""
+    cloud = getattr(session, "cloud_workspace", None)
+    if cloud is None:
+        return ""
+    return str(
+        getattr(cloud, "preview_url", "")
+        or getattr(cloud, "download_url", "")
+        or getattr(cloud, "share_url", "")
+        or ""
+    )
+
+
+def _first_turn_text(session: Any) -> str:
+    """Build the one-time pure-text welcome/workspace handoff."""
+    lines = [TEXT_FIRST_TURN_INTRO]
+    cloud_url = _cloud_workspace_url(session)
+    if cloud_url:
+        lines.extend(["", "工作区已创建", f"清华网盘工作区链接：{cloud_url}"])
+    return "\n".join(lines)
 
 
 def reserve_first_turn_intro(session_id: str | None, user_id: str) -> tuple[str, str]:
@@ -1135,7 +1162,8 @@ def chat_completion_payload(
         "x_agent_task": {
             "task_id": agent_result["task_id"],
             "status": agent_result["status"],
-            "artifact_root": agent_result["artifact_root"],
+            # Do not expose the server filesystem to text-only clients.
+            "artifact_root": "",
             "session_id": agent_result["session_id"],
             "progress": agent_result.get("progress", []),
         },
@@ -1178,6 +1206,17 @@ async def list_models(authorization: str | None = Header(default=None)) -> dict[
     return await upstream_list_models()
 
 
+@app.get("/v1")
+async def openai_compatible_discovery() -> dict[str, Any]:
+    """Describe the public OpenAI-compatible base path for gateway probes."""
+    return {
+        "object": "api",
+        "base_path": "/v1",
+        "endpoints": ["/v1/models", "/v1/chat/completions", "/v1/responses"],
+        "authentication": "Bearer token in the Authorization header",
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     payload: dict[str, Any],
@@ -1208,7 +1247,7 @@ async def chat_completions(
         session = await agent._prepare_chat_session(session_id, latest_user, user_id, sync_workspace=False)
         intro = ""
         if agent.store.consume_first_turn_intro(session.user_id):
-            intro = FIRST_TURN_INTRO
+            intro = _first_turn_text(session)
         task = await agent._create_chat_task(session, latest_user, sync_workspace=False)
         schedule_task(task.task_id, "start")
 
@@ -1252,6 +1291,11 @@ async def chat_completions(
             },
         )
     agent_result = await agent.chat(session_id, latest_user, user_id)
+    session = agent.store.load_session(agent_result["session_id"])
+    if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+        intro = _first_turn_text(session)
+        if intro:
+            agent_result["text"] = f"{intro}\n\n{agent_result['text']}"
     return chat_completion_payload(payload, agent_result)
 
 
@@ -1270,6 +1314,11 @@ async def responses(
     if user_id == "local" and payload.get("user"):
         user_id = str(payload.get("user"))
     result = await agent.chat(session_id, str(payload.get("input", "")), user_id)
+    session = agent.store.load_session(result["session_id"])
+    if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+        intro = _first_turn_text(session)
+        if intro:
+            result["text"] = f"{intro}\n\n{result['text']}"
     text = result["text"]
     response_id = result["task_id"] or result["session_id"]
     return {
@@ -1287,7 +1336,7 @@ async def responses(
         "metadata": {
             "task_id": result["task_id"],
             "status": result["status"],
-            "artifact_root": result["artifact_root"],
+            "artifact_root": "",
             "session_id": result["session_id"],
             "progress": result.get("progress", []),
         },
