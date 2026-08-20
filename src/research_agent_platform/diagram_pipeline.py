@@ -260,6 +260,8 @@ def _run_elk_panel(
             input=json.dumps(payload),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             check=False,
         )
@@ -362,6 +364,9 @@ def _resolve_font_path(family: str, *, require_cjk: bool) -> Path | None:
         Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
         Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/msyh.ttf"),
+        Path("C:/Windows/Fonts/simhei.ttf"),
     ]
     if not require_cjk:
         preferred.extend(
@@ -1131,6 +1136,8 @@ def _font_available(family: str) -> bool:
                 [fc_list, ":", "family"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )
