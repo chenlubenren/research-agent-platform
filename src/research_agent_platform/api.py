@@ -1295,7 +1295,10 @@ async def chat_completions(
     if session is not None and agent.store.consume_first_turn_intro(session.user_id):
         intro = _first_turn_text(session)
         if intro:
-            agent_result["text"] = f"{intro}\n\n{agent_result['text']}"
+            if agent_result.get("status") == "idle" and not agent_result.get("task_id"):
+                agent_result["text"] = intro
+            else:
+                agent_result["text"] = f"{intro}\n\n{agent_result['text']}"
     return chat_completion_payload(payload, agent_result)
 
 

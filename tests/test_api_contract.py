@@ -115,6 +115,7 @@ def test_openai_text_chat_adds_one_time_intro_and_hides_server_path(service, mon
     assert response.status_code == 200
     content = response.json()["choices"][0]["message"]["content"]
     assert "你好，我是科研智能体 Research Agent" in content
+    assert content.count("你好，我是科研智能体 Research Agent") == 1
     assert "/v1" not in content or "工作区" in content
     assert "/agent-workspace/" not in content
     assert response.json()["x_agent_task"]["artifact_root"] == ""
