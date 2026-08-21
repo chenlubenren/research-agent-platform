@@ -127,6 +127,7 @@ from .router.intent import (
 )
 from .state.store import StateStore
 from .upstream import generate_image, generate_text
+from .workspace_access import touch_workspace_access
 from .upstream import configured_model_for_role
 
 
@@ -688,8 +689,17 @@ class ResearchAgentService:
             session_id=session.session_id,
         )
         session.workspace_root = str(workspace_root.resolve())
+        touch_workspace_access(workspace_root)
         if sync_workspace and config.cloud_sync_enabled and session.cloud_workspace.status != "synced":
-            await self.sync_session_workspace(session)
+            try:
+                await asyncio.wait_for(
+                    self.sync_session_workspace(session),
+                    timeout=max(1.0, float(config.session_workspace_sync_timeout_seconds)),
+                )
+            except (asyncio.TimeoutError, Exception):
+                # Chat must remain available while best-effort cloud delivery
+                # continues through the existing per-session sync scheduler.
+                self._schedule_cloud_sync(session.session_id)
         session.history.append(MessageRecord(role="user", content=message))
         self.store.save_session(session)
         return session

@@ -705,6 +705,7 @@ FIRST_TURN_INTRO = (
     "-研究记忆/资料整理:/wiki\n"
     "你的问题已经接收到，请等待回复。"
 )
+from .workspace_access import touch_workspace_access
 BACKGROUND_ACK = "已经接收到您的请求，后台正在工作，请稍后..."
 TEXT_FIRST_TURN_INTRO = (
     "你好，我是科研智能体 Research Agent，专注于文献梳理、选题发现、实验规划、"
@@ -912,6 +913,7 @@ async def api_create_session(payload: dict[str, Any] | None = None) -> dict[str,
         session_id=session.session_id,
     )
     session.workspace_root = str(workspace_root.resolve())
+    touch_workspace_access(workspace_root)
     agent.store.save_session(session)
     cloud_workspace = await agent.sync_session_workspace(session)
     return {
@@ -932,6 +934,7 @@ async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
         user_id,
         sync_workspace=False,
     )
+    touch_workspace_access(session.workspace_root)
     intro = ""
     if agent.store.consume_first_turn_intro(session.user_id):
         intro = FIRST_TURN_INTRO
@@ -984,6 +987,7 @@ async def api_upload_session_files(
         session_id=session.session_id,
     )
     session.workspace_root = str(workspace_root.resolve())
+    touch_workspace_access(workspace_root)
     agent.store.save_session(session)
     artifacts: list[dict[str, Any]] = []
     for upload in files:
@@ -1034,6 +1038,7 @@ async def api_sync_session_workspace(session_id: str) -> dict[str, Any]:
     session = agent.store.load_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    touch_workspace_access(session.workspace_root)
     cloud_workspace = await agent.sync_session_workspace(session)
     return {
         "session_id": session.session_id,

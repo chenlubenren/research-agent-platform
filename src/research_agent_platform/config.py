@@ -234,6 +234,9 @@ class AppConfig(BaseModel):
     seafile_sync_retries: int = Field(
         default_factory=lambda: int(os.getenv("SEAFILE_SYNC_RETRIES", "3"))
     )
+    session_workspace_sync_timeout_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("SESSION_WORKSPACE_SYNC_TIMEOUT_SECONDS", "15"))
+    )
 
 
 config = AppConfig()

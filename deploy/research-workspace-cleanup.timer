@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily cleanup of stale Research Agent session workspaces
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

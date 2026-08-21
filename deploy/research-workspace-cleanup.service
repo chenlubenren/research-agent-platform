@@ -1,0 +1,7 @@
+[Unit]
+Description=Remove stale Research Agent session workspaces
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/apps/research-agent-platform/.venv/bin/python /opt/apps/research-agent-platform/deploy/cleanup_stale_workspaces.py --root /opt/apps/research-agent-platform/agent-workspace/local --root /opt/apps/research-presentation-agent/runs/sessions --ttl-hours 168
