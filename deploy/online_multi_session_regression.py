@@ -94,8 +94,13 @@ async def run_session(
     session_index: int,
     rounds: int,
     semaphore: asyncio.Semaphore,
+    run_tag: str,
 ) -> SessionRecord:
-    session_id = f"multi-regression-{service}-{session_index:04d}"
+    # A regression run must never silently reuse a previous server workspace:
+    # that turns the first request into a share-link lookup instead of a new
+    # session creation and can make a valid fresh-session test look like a
+    # 90-second timeout.  The tag is recorded in the session id and output.
+    session_id = f"multi-regression-{service}-{run_tag}-{session_index:04d}"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     messages: list[dict[str, str]] = []
     turns: list[TurnRecord] = []
@@ -193,6 +198,7 @@ async def run_service(
     count: int,
     rounds: int,
     concurrency: int,
+    run_tag: str,
 ) -> list[SessionRecord]:
     env = load_env(env_path)
     timeout = httpx.Timeout(90.0, connect=10.0)
@@ -208,6 +214,7 @@ async def run_service(
                 session_index=index,
                 rounds=rounds,
                 semaphore=semaphore,
+                run_tag=run_tag,
             )
             for index in range(1, count + 1)
         ]
@@ -254,6 +261,7 @@ def summarize(records: list[SessionRecord]) -> dict[str, Any]:
 
 
 async def main_async(args: argparse.Namespace) -> None:
+    run_tag = args.run_tag or time.strftime("%Y%m%d%H%M%S", time.gmtime())
     records: list[SessionRecord] = []
     if not args.only or args.only == "platform":
         records.extend(
@@ -265,6 +273,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 args.sessions,
                 args.rounds,
                 args.concurrency,
+                run_tag,
             )
         )
     if not args.only or args.only == "presentation":
@@ -277,6 +286,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 args.sessions,
                 args.rounds,
                 args.concurrency,
+                run_tag,
             )
         )
     output = pathlib.Path(args.output)
@@ -323,6 +333,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--platform-env", default="research-agent-platform/.env")
     parser.add_argument("--presentation-env", default="research-presentation-agent/.env")
     parser.add_argument("--output", default="output/online-multi-session-regression.jsonl")
+    parser.add_argument("--run-tag", default="", help="unique tag used in session ids; defaults to current UTC time")
     return parser.parse_args()
 
 
