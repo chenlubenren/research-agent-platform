@@ -346,8 +346,20 @@ class ResearchAgentService:
         self.workflows = workflow_registry()
         self.runtime = LangGraphWorkflowRuntime(self, self.workflows)
 
-    async def chat(self, session_id: str | None, message: str, user_id: str | None = None) -> dict:
-        session = await self._prepare_chat_session(session_id, message, user_id)
+    async def chat(
+        self,
+        session_id: str | None,
+        message: str,
+        user_id: str | None = None,
+        *,
+        sync_workspace: bool = True,
+    ) -> dict:
+        session = await self._prepare_chat_session(
+            session_id,
+            message,
+            user_id,
+            sync_workspace=sync_workspace,
+        )
         session_context = self._session_context(session)
 
         active_task = self.store.load_task(session.active_task_id) if session.active_task_id else None

@@ -1295,7 +1295,12 @@ async def chat_completions(
                 "X-Accel-Buffering": "no",
             },
         )
-    agent_result = await agent.chat(session_id, latest_user, user_id)
+    # OpenAI-compatible chat must not wait on best-effort Seafile delivery.
+    # Workspace access is touched synchronously and the existing background
+    # scheduler can finish delivery; keeping this request local prevents a
+    # congested cloud endpoint from turning ordinary multi-turn chat into
+    # 90-second timeouts/429s.
+    agent_result = await agent.chat(session_id, latest_user, user_id, sync_workspace=False)
     session = agent.store.load_session(agent_result["session_id"])
     if session is not None and agent.store.consume_first_turn_intro(session.user_id):
         intro = _first_turn_text(session)
@@ -1321,7 +1326,7 @@ async def responses(
         user_id = str(metadata.get("user_id") or metadata.get("user") or user_id)
     if user_id == "local" and payload.get("user"):
         user_id = str(payload.get("user"))
-    result = await agent.chat(session_id, str(payload.get("input", "")), user_id)
+    result = await agent.chat(session_id, str(payload.get("input", "")), user_id, sync_workspace=False)
     session = agent.store.load_session(result["session_id"])
     if session is not None and agent.store.consume_first_turn_intro(session.user_id):
         intro = _first_turn_text(session)
