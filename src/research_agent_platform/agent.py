@@ -1078,7 +1078,13 @@ class ResearchAgentService:
             for phrase in (
                 "工作区是什么",
                 "什么是工作区",
+                "工作区链接",
+                "工作区在哪",
+                "工作区哪里",
+                "工作空间链接",
+                "工作空间在哪",
                 "workspace是什么",
+                "workspace链接",
                 "whatistheworkspace",
             )
         )
