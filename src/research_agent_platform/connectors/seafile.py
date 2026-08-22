@@ -13,6 +13,7 @@ from ..artifacts.store import WORKSPACE_DIRS
 
 
 CLOUD_STATE_PATH = PurePosixPath("Content/CLOUD_SYNC.json")
+SHARE_LINK_ENDPOINT_UNAVAILABLE = {404, 405, 501}
 
 
 @dataclass
@@ -195,8 +196,23 @@ class SeafileWorkspaceSync:
                 uploaded_files += 1
 
             share_url = ""
+            share_link_error = ""
             if self.create_share_links:
-                share_url = await self._get_or_create_share_link(client, repo_id, remote_path)
+                try:
+                    share_url = await self._get_or_create_share_link(client, repo_id, remote_path)
+                except httpx.HTTPStatusError as exc:
+                    status_code = exc.response.status_code if exc.response is not None else 0
+                    if status_code not in SHARE_LINK_ENDPOINT_UNAVAILABLE:
+                        raise
+                    # Some institutional Seafile deployments disable the public
+                    # share-link API while keeping normal file sync available.
+                    # Do not turn a successfully mirrored workspace into a
+                    # failed sync, and never expose the failed endpoint as a
+                    # user-facing URL.
+                    share_link_error = (
+                        "文件已同步，但清华网盘未提供公开分享链接 "
+                        f"（分享接口 HTTP {status_code}）。请登录网盘后按工作区路径访问。"
+                    )
             result = SeafileSyncResult(
                 status="synced",
                 remote_path=remote_path,
@@ -206,6 +222,7 @@ class SeafileWorkspaceSync:
                 download_url=share_url,
                 synced_files=len(files),
                 uploaded_files=uploaded_files,
+                error=share_link_error,
             )
             self._write_local_state(
                 workspace_root,

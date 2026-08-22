@@ -412,7 +412,7 @@ class ResearchAgentService:
                 else:
                     reply = self._build_reply(
                         task,
-                        text="已经接收到您的请求，后台正在工作，请稍后...",
+                        text="已收到指令，正在执行...（这可能需要几分钟的时间，完成后会直接给你访问工作空间的链接）",
                     )
         latest_session = self.store.load_session(session.session_id) or session
         latest_session.history.append(MessageRecord(role="assistant", content=reply["text"]))
@@ -429,7 +429,10 @@ class ResearchAgentService:
         session_context = self._session_context(session)
 
         self._log_progress(task, "正在分析请求类型", kind="router")
+        workspace_reply = self._workspace_info_reply(session, task.objective)
         direct_reply = self._direct_chat_response("".join(task.objective.lower().split()))
+        if workspace_reply is not None:
+            direct_reply = workspace_reply
         route = None if direct_reply is not None else await route_message(task.objective, session_context)
         if route is not None:
             task.command = route.command
@@ -798,7 +801,9 @@ class ResearchAgentService:
 
     async def _chat_reply(self, session: ChatSession, latest_message: str | None = None) -> dict:
         latest_message = latest_message if latest_message is not None else session.history[-1].content if session.history else ""
-        direct_reply = self._direct_chat_response(latest_message)
+        direct_reply = self._workspace_info_reply(session, latest_message)
+        if direct_reply is None:
+            direct_reply = self._direct_chat_response(latest_message)
         if direct_reply:
             return {
                 "text": direct_reply,
@@ -1014,6 +1019,11 @@ class ResearchAgentService:
 
     def _direct_chat_response(self, message: str) -> str | None:
         normalized = "".join(message.lower().split())
+        if self._is_workspace_question(normalized):
+            return (
+                "工作区是当前会话专属的研究文件夹，用来保存上传资料、生成的论文/图表/PPT和过程记录。"
+                "继续在当前会话提问会复用同一个工作区；点击“新会话”才会创建新的独立工作区。"
+            )
         if self._is_greeting_message(normalized):
             return (
                 "你好，我是科研智能体 Research Agent。"
@@ -1034,6 +1044,42 @@ class ResearchAgentService:
                 "/write 产出论文草稿，/rebuttal 处理审稿意见，/wiki 回看本地研究记忆。"
             )
         return None
+
+    def _is_workspace_question(self, normalized_message: str) -> bool:
+        return any(
+            phrase in normalized_message
+            for phrase in (
+                "工作区是什么",
+                "什么是工作区",
+                "workspace是什么",
+                "whatistheworkspace",
+            )
+        )
+
+    def _workspace_info_reply(self, session: ChatSession, message: str) -> str | None:
+        normalized = "".join(message.lower().split())
+        if not self._is_workspace_question(normalized):
+            return None
+        lines = [
+            "工作区是当前会话专属的研究文件夹，用来保存上传资料、生成的论文/图表/PPT和过程记录。",
+            "继续在当前会话提问会复用同一个工作区；点击“新会话”才会创建新的独立工作区。",
+        ]
+        lines.append(
+            f"当前会话：`{session.session_id}`；本地文件会保存在该会话的专属工作区，"
+            "服务器本地路径不会通过聊天接口暴露。"
+        )
+        cloud = session.cloud_workspace
+        cloud_url = self._cloud_workspace_url(cloud)
+        if cloud.status == "synced" and cloud_url:
+            lines.append(f"清华网盘工作区链接：{cloud_url}")
+        elif cloud.status == "synced" and cloud.error:
+            lines.append(f"清华网盘状态：{cloud.error}")
+        elif cloud.status == "error":
+            detail = cloud.error or cloud.configuration_hint or "暂时不可用"
+            lines.append(f"清华网盘同步暂未成功：{detail}。本地工作区仍可继续使用。")
+        elif cloud.status == "disabled":
+            lines.append("清华网盘同步未启用；本地工作区仍可继续使用。")
+        return "\n".join(lines)
 
     def _is_identity_question(self, normalized_message: str) -> bool:
         if not normalized_message:

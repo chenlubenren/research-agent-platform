@@ -274,6 +274,12 @@ CHAT_PAGE = """<!doctype html>
           ? `同步失败：${cloud.error || "未知错误"}`
           : `已同步 ${cloud.synced_files || 0} 个文件到 ${cloud.remote_path || "云盘"}`;
       block.appendChild(status);
+      if (cloud.status !== "error" && cloud.error) {
+        const warning = document.createElement("div");
+        warning.className = "muted warning";
+        warning.textContent = cloud.error;
+        block.appendChild(warning);
+      }
       const linksWrap = document.createElement("div");
       linksWrap.className = "cloud-links";
       const links = [
@@ -706,7 +712,7 @@ FIRST_TURN_INTRO = (
     "你的问题已经接收到，请等待回复。"
 )
 from .workspace_access import touch_workspace_access
-BACKGROUND_ACK = "已经接收到您的请求，后台正在工作，请稍后..."
+BACKGROUND_ACK = "已收到指令，正在执行...（这可能需要几分钟的时间，完成后会直接给你访问工作空间的链接）"
 TEXT_FIRST_TURN_INTRO = (
     "你好，我是科研智能体 Research Agent，专注于文献梳理、选题发现、实验规划、"
     "论文写作、审稿回复和科研资料整理。你可以直接用文字描述需求，也可以使用 /review、"

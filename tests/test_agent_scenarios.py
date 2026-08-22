@@ -20,6 +20,18 @@ def test_direct_chat_identity_reply(service: ResearchAgentService):
     assert "科研" in result["text"]
 
 
+def test_workspace_question_is_deterministic_and_explains_session_scope(service: ResearchAgentService):
+    result = run(service.chat(None, "工作区是什么？"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert "当前会话专属的研究文件夹" in result["text"]
+    assert "点击“新会话”才会创建新的独立工作区" in result["text"]
+    assert "清华网盘同步未启用" in result["text"]
+    assert "HTTPStatusError" not in result["text"]
+    assert "agent-workspace" not in result["text"]
+
+
 def test_present_runs_without_routine_checkpoint(service: ResearchAgentService, isolated_env):
     start = run(service.chat(None, "/present 做一个中文汇报"))
     task_id = start["task_id"]

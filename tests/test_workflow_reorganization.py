@@ -239,6 +239,45 @@ def test_seafile_workspace_sync_is_incremental(tmp_path: Path):
     assert state["file_signatures"]["paper/draft.md"]
 
 
+def test_seafile_share_link_404_does_not_discard_synced_workspace(tmp_path: Path):
+    workspace = tmp_path / "agent-workspace" / "local" / "session_no_share_link"
+    source = workspace / "paper" / "draft.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("synced despite share-link API gap", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api2/repos/repo-1/dir/":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api2/repos/repo-1/upload-link/":
+            return httpx.Response(200, json="https://cloud.example/upload/repo-1")
+        if request.url.path == "/upload/repo-1":
+            return httpx.Response(200, json={"id": "file-id"})
+        if request.url.path == "/api/v2.1/share-links/":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        raise AssertionError(f"Unexpected Seafile request: {request.method} {request.url}")
+
+    sync = SeafileWorkspaceSync(
+        enabled=True,
+        base_url="https://cloud.example",
+        api_token="test-token",
+        repo_id="repo-1",
+        remote_root="research-agent",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = asyncio.run(
+        sync.sync_workspace(workspace, user_id="local", session_id="session_no_share_link")
+    )
+
+    assert result.status == "synced"
+    assert result.uploaded_files == 1
+    assert not result.preview_url
+    assert "文件已同步" in result.error
+    assert "HTTP 404" in result.error
+    state = json.loads((workspace / "Content" / "CLOUD_SYNC.json").read_text(encoding="utf-8"))
+    assert state["status"] == "synced"
+
+
 def test_completed_reply_includes_cloud_delivery_link(service: ResearchAgentService):
     session = service.store.create_session()
     session.cloud_workspace = CloudWorkspaceState(
