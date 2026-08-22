@@ -85,6 +85,7 @@ from .presentation import (
     extract_presentation_assets,
     parse_slide_content,
     parse_speaker_notes,
+    PRESENTATION_IMAGE_SIZE,
     presentation_design_spec_to_json,
     presentation_assets_from_json,
     presentation_assets_to_json,
@@ -3752,7 +3753,7 @@ class ResearchAgentService:
                     image = await generate_image(
                         prompt=prompt,
                         model="gpt-image-2",
-                        size="1536x1024",
+                        size=PRESENTATION_IMAGE_SIZE,
                         quality="medium",
                         output_format="png",
                     )

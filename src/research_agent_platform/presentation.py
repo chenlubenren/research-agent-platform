@@ -18,6 +18,8 @@ from pptx.util import Emu
 
 from .models import PresentationSourceConfig, UploadBatchRecord
 
+PRESENTATION_IMAGE_SIZE = "1536x864"
+
 
 TEXT_EXTENSIONS = {
     ".cfg",
@@ -1578,7 +1580,11 @@ def resolve_slide_source_image(slide: SlideSpec, evidence: WorkspaceEvidence, wo
 
 
 def fit_slide_image(image_bytes: bytes, *, canvas_size: tuple[int, int] = (1536, 864)) -> bytes:
-    """Fit an Image-2 render into 16:9 without cropping or stretching it."""
+    """Fit an Image-2 render into 16:9 without cropping or stretching it.
+
+    Presentation generation requests ``PRESENTATION_IMAGE_SIZE`` directly;
+    this remains a safety net for provider resampling or legacy responses.
+    """
 
     with Image.open(io.BytesIO(image_bytes)) as source:
         image = source.convert("RGB")

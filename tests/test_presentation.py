@@ -19,6 +19,7 @@ from research_agent_platform.presentation import (
     extract_presentation_assets,
     parse_slide_content,
     parse_speaker_notes,
+    PRESENTATION_IMAGE_SIZE,
     presentation_design_spec_to_json,
     reconcile_slide_specs,
     resolve_presentation_source_config,
@@ -95,6 +96,10 @@ def test_image2_fit_preserves_top_and_bottom_content(tmp_path: Path):
     bottom_pixel = fitted.getpixel((768, 863))
     assert top_pixel[0] > 150 and top_pixel[0] > top_pixel[2]
     assert bottom_pixel[2] > 150 and bottom_pixel[2] > bottom_pixel[0]
+
+
+def test_presentation_image_generation_requests_native_widescreen_size():
+    assert PRESENTATION_IMAGE_SIZE == "1536x864"
 
 
 def test_image2_prompt_uses_user_topic_not_stage_report_as_subject():
