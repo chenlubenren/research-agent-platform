@@ -32,6 +32,32 @@ def test_workspace_question_is_deterministic_and_explains_session_scope(service:
     assert "agent-workspace" not in result["text"]
 
 
+def test_information_question_does_not_create_a_workflow_task(service: ResearchAgentService, monkeypatch):
+    async def answer_question(**_kwargs):
+        return "PPT 是用于组织和展示内容的演示文稿格式。"
+
+    monkeypatch.setattr(agent_module, "generate_text", answer_question)
+    result = run(service.chat(None, "PPT是什么？"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert "演示文稿" in result["text"]
+    assert service.list_tasks(result["session_id"]) == []
+
+
+def test_natural_language_explanation_does_not_start_file_workflow(service: ResearchAgentService, monkeypatch):
+    async def answer_question(**_kwargs):
+        return "PPT 通常包括背景、方法、结果和结论。"
+
+    monkeypatch.setattr(agent_module, "generate_text", answer_question)
+    result = run(service.chat(None, "介绍一下PPT常见结构"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert "PPT" in result["text"]
+    assert service.list_tasks(result["session_id"]) == []
+
+
 def test_present_runs_without_routine_checkpoint(service: ResearchAgentService, isolated_env):
     start = run(service.chat(None, "/present 做一个中文汇报"))
     task_id = start["task_id"]

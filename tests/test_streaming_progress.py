@@ -53,7 +53,7 @@ def test_cloud_config_endpoint_exposes_disabled_reason(service: ResearchAgentSer
     assert "CLOUD_SYNC_ENABLED" in payload["hint"]
 
 
-def test_plain_question_uses_sse_progress_without_hidden_chain_of_thought(
+def test_plain_question_is_answered_without_background_file_task(
     service: ResearchAgentService, monkeypatch
 ):
     monkeypatch.setattr(api_module, "agent", service)
@@ -67,29 +67,32 @@ def test_plain_question_uses_sse_progress_without_hidden_chain_of_thought(
         response = await api_module.api_agent_chat(
             {"session_id": None, "message": "请解释当前研究工作区如何组织", "user_id": "local"}
         )
-        task_id = response["task_id"]
-        assert response["status"] == "running"
+        assert response["task_id"] == ""
+        assert response["status"] == "idle"
         assert "科研智能体(ResearchAgent)" in response["text"]
-        running_task = api_module.background_tasks[task_id]
-        stream_response = await api_module.api_task_events(task_id)
-        events = []
-        async for chunk in stream_response.body_iterator:
-            if isinstance(chunk, bytes):
-                chunk = chunk.decode("utf-8")
-            if "data: " not in chunk:
-                continue
-            event_name = chunk.split("event: ", 1)[1].split("\n", 1)[0]
-            payload = json.loads(chunk.split("data: ", 1)[1].split("\n", 1)[0])
-            events.append((event_name, payload))
-            if event_name == "done":
-                break
+        assert not api_module.background_tasks
+        assert service.list_tasks(response["session_id"]) == []
 
-        await running_task
-        progress = [payload["event"] for name, payload in events if name == "progress"]
-        assert any(event["kind"] == "router" for event in progress)
-        assert any(event["kind"] == "response" for event in progress)
-        assert all("chain" not in event["message"].lower() for event in progress)
-        assert events[-1][1]["task"]["response_text"]
+    asyncio.run(scenario())
+
+
+def test_short_artifact_keyword_is_not_enough_to_start_background_task(
+    service: ResearchAgentService, monkeypatch
+):
+    monkeypatch.setattr(api_module, "agent", service)
+
+    async def answer_question(**_kwargs):
+        return "PPT 是演示文稿。"
+
+    monkeypatch.setattr("research_agent_platform.agent.generate_text", answer_question)
+
+    async def scenario():
+        response = await api_module.api_agent_chat(
+            {"session_id": None, "message": "PPT", "user_id": "local"}
+        )
+        assert response["task_id"] == ""
+        assert response["status"] == "idle"
+        assert service.list_tasks(response["session_id"]) == []
 
     asyncio.run(scenario())
 

@@ -22,6 +22,7 @@ from .uploads import (
     sanitize_upload_filename,
     upload_artifact_kind,
 )
+from .router.intent import has_execution_intent, is_informational_question
 
 
 CHAT_PAGE = """<!doctype html>
@@ -934,6 +935,12 @@ async def api_create_session(payload: dict[str, Any] | None = None) -> dict[str,
 async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
     user_id = str(payload.get("user_id") or "local")
     message = str(payload.get("message", ""))
+    if is_informational_question(message) or not has_execution_intent(message):
+        result = await agent.chat(payload.get("session_id"), message, user_id, sync_workspace=False)
+        session = agent.store.load_session(result["session_id"])
+        if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+            result["text"] = f"{FIRST_TURN_INTRO}\n\n{result['text']}"
+        return result
     session = await agent._prepare_chat_session(
         payload.get("session_id"),
         message,
@@ -1255,6 +1262,25 @@ async def chat_completions(
         latest_user = "Please summarize the current task state."
 
     if payload.get("stream"):
+        if is_informational_question(latest_user) or not has_execution_intent(latest_user):
+            result = await agent.chat(session_id, latest_user, user_id, sync_workspace=False)
+            session = agent.store.load_session(result["session_id"])
+            if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+                result["text"] = f"{_first_turn_text(session)}\n\n{result['text']}"
+
+            async def direct_event_stream():
+                yield _openai_stream_chunk(chat_completion_stream_payload(payload, result))
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                direct_event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         session = await agent._prepare_chat_session(session_id, latest_user, user_id, sync_workspace=False)
         intro = ""
         if agent.store.consume_first_turn_intro(session.user_id):

@@ -19,7 +19,11 @@ from research_agent_platform.config import config
 from research_agent_platform.connectors.seafile import SeafileSyncResult, SeafileWorkspaceSync
 from research_agent_platform.graphs.workflows import workflow_registry
 from research_agent_platform.models import ArtifactRecord, ChatSession, CloudWorkspaceState, TaskRun
-from research_agent_platform.router.intent import route_message
+from research_agent_platform.router.intent import (
+    has_execution_intent,
+    is_informational_question,
+    route_message,
+)
 
 
 def test_generated_artifact_cleaner_removes_tool_chatter_before_markdown_title():
@@ -195,6 +199,46 @@ def test_router_separates_literature_review_and_peer_review():
     assert rebuttal is not None and rebuttal.command == "/rebuttal"
     assert idea is not None and idea.command == "/idea"
     assert plan is not None and plan.command == "/plan"
+
+
+def test_router_keeps_information_questions_out_of_file_workflows():
+    assert is_informational_question("PPT是什么？")
+    assert is_informational_question("论文写作包括哪些部分？")
+    assert is_informational_question("怎么生成一页PPT？")
+    assert is_informational_question("请帮我画一张机制图，可以吗？")
+    assert asyncio.run(route_message("PPT是什么？")) is None
+    assert asyncio.run(route_message("论文写作包括哪些部分？")) is None
+    assert asyncio.run(route_message("怎么生成一页PPT？")) is None
+    command = asyncio.run(route_message("请生成一份PPT"))
+    assert command is not None and command.command == "/present"
+
+
+def test_router_requires_execution_intent_before_keyword_workflow():
+    informational = (
+        "介绍一下PPT怎么用",
+        "我想了解论文写作",
+        "请解释汇报和论文的区别",
+        "PPT有哪些常见结构",
+        "做PPT需要哪些部分？",
+        "怎么做一份汇报？",
+    )
+    for message in informational:
+        assert asyncio.run(route_message(message)) is None
+
+    executable = (
+        "帮我制作一份PPT",
+        "做个PPT",
+        "帮我做一份汇报",
+        "给我弄一张机制图",
+        "来一个论文汇报",
+        "能不能帮我做个PPT",
+        "请写一篇文献综述",
+        "请整理审稿意见并生成回复",
+        "围绕这个方向提出三个创新点",
+    )
+    for message in executable:
+        assert has_execution_intent(message), message
+        assert asyncio.run(route_message(message)) is not None
 
 
 def test_seafile_workspace_sync_is_incremental(tmp_path: Path):

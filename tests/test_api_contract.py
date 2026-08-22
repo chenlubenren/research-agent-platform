@@ -69,6 +69,32 @@ def test_openai_compatible_chat_completion_streams_done_marker(service, monkeypa
     assert "data: [DONE]" in body
 
 
+def test_openai_streaming_information_question_does_not_create_task(service, monkeypatch):
+    monkeypatch.setattr(api_module, "agent", service)
+
+    async def answer_question(**_kwargs):
+        return "PPT 是演示文稿。"
+
+    monkeypatch.setattr(agent_module, "generate_text", answer_question)
+    client = TestClient(api_module.app)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "research-agent-platform",
+            "stream": True,
+            "messages": [{"role": "user", "content": "PPT是什么？"}],
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert '"task_id": ""' in body
+    assert '"status": "idle"' in body
+    assert "data: [DONE]" in body
+
+
 def test_openai_compatible_chat_completion_handles_greeting_without_upstream_call(
     service, monkeypatch
 ):

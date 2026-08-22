@@ -122,6 +122,8 @@ from .reference_expansion import (
 from .router.intent import (
     RouteDecision,
     explicit_route,
+    has_execution_intent,
+    is_informational_question,
     is_approval_message,
     is_stop_message,
     route_message,
@@ -370,6 +372,8 @@ class ResearchAgentService:
             direct_reply = self._direct_chat_response("".join(message.lower().split()))
             if direct_reply is not None:
                 reply = await self._chat_reply(session)
+            elif is_informational_question(message) or not has_execution_intent(message):
+                reply = await self._chat_reply(session, latest_message=message)
             else:
                 route = await route_message(message, session_context)
                 if route is None:
@@ -397,14 +401,17 @@ class ResearchAgentService:
         else:
             route = explicit_route(message)
             if route is None:
-                task = await self._create_chat_task(session, message, sync_workspace=sync_workspace)
-                reply = self._build_reply(
-                    task,
-                    text=(
-                        f"已接收问题，任务 `{task.task_id}` 正在后台处理。"
-                        "路由、模型调用和回答完成状态将通过 SSE 推送。"
-                    ),
-                )
+                if is_informational_question(message) or not has_execution_intent(message):
+                    reply = await self._chat_reply(session, latest_message=message)
+                else:
+                    task = await self._create_chat_task(session, message, sync_workspace=sync_workspace)
+                    reply = self._build_reply(
+                        task,
+                        text=(
+                            f"已接收问题，任务 `{task.task_id}` 正在后台处理。"
+                            "路由、模型调用和回答完成状态将通过 SSE 推送。"
+                        ),
+                    )
             else:
                 task = await self._create_task(session, message, route, sync_workspace=sync_workspace)
                 if task.status == "failed":
@@ -433,6 +440,8 @@ class ResearchAgentService:
         direct_reply = self._direct_chat_response("".join(task.objective.lower().split()))
         if workspace_reply is not None:
             direct_reply = workspace_reply
+        elif is_informational_question(task.objective) or not has_execution_intent(task.objective):
+            direct_reply = (await self._chat_reply(session, latest_message=task.objective))["text"]
         route = None if direct_reply is not None else await route_message(task.objective, session_context)
         if route is not None:
             task.command = route.command
