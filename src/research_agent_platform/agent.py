@@ -715,15 +715,20 @@ class ResearchAgentService:
         )
         session.workspace_root = str(workspace_root.resolve())
         touch_workspace_access(workspace_root)
-        if sync_workspace and config.cloud_sync_enabled and session.cloud_workspace.status != "synced":
-            try:
-                await asyncio.wait_for(
-                    self.sync_session_workspace(session),
-                    timeout=max(1.0, float(config.session_workspace_sync_timeout_seconds)),
-                )
-            except (asyncio.TimeoutError, Exception):
-                # Chat must remain available while best-effort cloud delivery
-                # continues through the existing per-session sync scheduler.
+        if config.cloud_sync_enabled and session.cloud_workspace.status != "synced":
+            if sync_workspace:
+                try:
+                    await asyncio.wait_for(
+                        self.sync_session_workspace(session),
+                        timeout=max(1.0, float(config.session_workspace_sync_timeout_seconds)),
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    # Chat must remain available while best-effort cloud
+                    # delivery continues through the per-session scheduler.
+                    self._schedule_cloud_sync(session.session_id)
+            else:
+                # Text/OpenAI-compatible clients do not wait on Seafile, but
+                # opening a session must still start the actual handoff.
                 self._schedule_cloud_sync(session.session_id)
         session.history.append(MessageRecord(role="user", content=message))
         self.store.save_session(session)
@@ -810,6 +815,19 @@ class ResearchAgentService:
 
     async def _chat_reply(self, session: ChatSession, latest_message: str | None = None) -> dict:
         latest_message = latest_message if latest_message is not None else session.history[-1].content if session.history else ""
+        if (
+            self._is_workspace_question("".join(latest_message.lower().split()))
+            and config.cloud_sync_enabled
+            and session.cloud_workspace.status != "synced"
+        ):
+            try:
+                await asyncio.wait_for(
+                    self.sync_session_workspace(session),
+                    timeout=max(1.0, float(config.session_workspace_sync_timeout_seconds)),
+                )
+            except (asyncio.TimeoutError, Exception):
+                self._schedule_cloud_sync(session.session_id)
+                session = self.store.load_session(session.session_id) or session
         direct_reply = self._workspace_info_reply(session, latest_message)
         if direct_reply is None:
             direct_reply = self._direct_chat_response(latest_message)
@@ -1083,9 +1101,8 @@ class ResearchAgentService:
             lines.append(f"清华网盘工作区链接：{cloud_url}")
         elif cloud.status == "synced" and cloud.error:
             lines.append(f"清华网盘状态：{cloud.error}")
-        elif cloud.status == "error":
-            detail = cloud.error or cloud.configuration_hint or "暂时不可用"
-            lines.append(f"清华网盘同步暂未成功：{detail}。本地工作区仍可继续使用。")
+        elif cloud.status in {"error", "pending"}:
+            lines.append("清华网盘工作区链接正在生成中；本地工作区已创建，完成后会在当前会话返回真实链接。")
         elif cloud.status == "disabled":
             lines.append("清华网盘同步未启用；本地工作区仍可继续使用。")
         return "\n".join(lines)

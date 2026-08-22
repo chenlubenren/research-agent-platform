@@ -154,6 +154,7 @@ CHAT_PAGE = """<!doctype html>
     const uploadList = document.getElementById("upload-list");
     let currentTaskId = "";
     let currentCheckpoint = null;
+    let cloudPollTimer = null;
     let uploadInProgress = false;
     let pollTimer = null;
     let taskEventSource = null;
@@ -272,10 +273,12 @@ CHAT_PAGE = """<!doctype html>
       const block = systemMessage("cloud-workspace", "云端工作区");
       const status = document.createElement("div");
       status.textContent = cloud.status === "error"
-          ? `同步失败：${cloud.error || "未知错误"}`
-          : `已同步 ${cloud.synced_files || 0} 个文件到 ${cloud.remote_path || "云盘"}`;
+          ? `同步失败：${cloud.error || "请稍后重试"}`
+          : cloud.status === "pending"
+            ? "清华网盘工作区链接正在生成中，完成后会自动显示。"
+            : `已同步 ${cloud.synced_files || 0} 个文件到 ${cloud.remote_path || "云盘"}`;
       block.appendChild(status);
-      if (cloud.status !== "error" && cloud.error) {
+      if (cloud.status !== "error" && cloud.status !== "pending" && cloud.error) {
         const warning = document.createElement("div");
         warning.className = "muted warning";
         warning.textContent = cloud.error;
@@ -304,7 +307,21 @@ CHAT_PAGE = """<!doctype html>
         direct.textContent = `网盘链接：${directUrl}`;
         block.appendChild(direct);
       }
+      if (cloud.status === "pending") scheduleCloudWorkspacePoll();
       chat.scrollTop = chat.scrollHeight;
+    }
+
+    function scheduleCloudWorkspacePoll() {
+      if (cloudPollTimer || !sessionInput.value.trim()) return;
+      cloudPollTimer = window.setTimeout(async () => {
+        cloudPollTimer = null;
+        try {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(sessionInput.value.trim())}`);
+          if (!response.ok) return;
+          const data = await response.json();
+          renderCloudWorkspace(data.cloud_workspace || {});
+        } catch (_) { /* a later user action can retry */ }
+      }, 2500);
     }
 
     async function syncCloudWorkspace() {
@@ -740,6 +757,19 @@ def _first_turn_text(session: Any) -> str:
     cloud_url = _cloud_workspace_url(session)
     if cloud_url:
         lines.extend(["", "工作区已创建", f"清华网盘工作区链接：{cloud_url}"])
+    elif config.cloud_sync_enabled:
+        lines.extend(["", "工作区已创建", "清华网盘工作区链接正在生成中，生成后会自动显示在当前会话。"])
+    return "\n".join(lines)
+
+
+def _first_turn_router_text(session: Any) -> str:
+    """Build the browser/SSE welcome while retaining the legacy router intro."""
+    lines = [FIRST_TURN_INTRO]
+    cloud_url = _cloud_workspace_url(session)
+    if cloud_url:
+        lines.extend(["", "工作区已创建", f"清华网盘工作区链接：{cloud_url}"])
+    elif config.cloud_sync_enabled:
+        lines.extend(["", "工作区已创建", "清华网盘工作区链接正在生成中，生成后会自动显示在当前会话。"])
     return "\n".join(lines)
 
 
@@ -747,7 +777,7 @@ def reserve_first_turn_intro(session_id: str | None, user_id: str) -> tuple[str,
     session = agent.store.get_or_create_session(session_id, user_id)
     intro = ""
     if agent.store.consume_first_turn_intro(session.user_id):
-        intro = FIRST_TURN_INTRO
+        intro = _first_turn_text(session)
     return session.session_id, intro
 
 
@@ -939,7 +969,7 @@ async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
         result = await agent.chat(payload.get("session_id"), message, user_id, sync_workspace=False)
         session = agent.store.load_session(result["session_id"])
         if session is not None and agent.store.consume_first_turn_intro(session.user_id):
-            result["text"] = f"{FIRST_TURN_INTRO}\n\n{result['text']}"
+            result["text"] = f"{_first_turn_router_text(session)}\n\n{result['text']}"
         return result
     session = await agent._prepare_chat_session(
         payload.get("session_id"),
@@ -1232,6 +1262,18 @@ async def openai_compatible_discovery() -> dict[str, Any]:
         "base_path": "/v1",
         "endpoints": ["/v1/models", "/v1/chat/completions", "/v1/responses"],
         "authentication": "Bearer token in the Authorization header",
+    }
+
+
+@app.get("/api/sessions/{session_id}")
+def api_get_session_workspace(session_id: str) -> dict[str, Any]:
+    session = agent.store.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    return {
+        "session_id": session.session_id,
+        "workspace_root": session.workspace_root,
+        "cloud_workspace": session.cloud_workspace.model_dump(),
     }
 
 
