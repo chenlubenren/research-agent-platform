@@ -419,7 +419,7 @@ class ResearchAgentService:
                 else:
                     reply = self._build_reply(
                         task,
-                        text="已收到指令，正在执行...（这可能需要几分钟的时间，完成后会直接给你访问工作空间的链接）",
+                        text="已收到指令，正在执行... （这可能需要几分钟的时间，完成后会直接给你访问工作空间的链接）",
                     )
         latest_session = self.store.load_session(session.session_id) or session
         latest_session.history.append(MessageRecord(role="assistant", content=reply["text"]))
