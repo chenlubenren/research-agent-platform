@@ -462,7 +462,9 @@ async def route_message(message: str, context: str = "") -> RouteDecision | None
     classifier_prompt = (
         "Classify the user's request into exactly one command from the list below, or return chat.\n"
         "Return chat for questions, explanations, capability checks, definitions, comparisons, or how-to advice. "
-        "Only select a command when the user explicitly asks you to perform the workflow or create/download an artifact.\n"
+        "Only select a command when the user explicitly asks you to perform the workflow or create/download an artifact. "
+        "Spoken requests such as 做个PPT, 帮我做一份汇报, 给我弄一张图, or 来一个论文汇报 are execution requests; "
+        "phrases such as 是什么, 怎么做, 如何使用, or 介绍一下 are informational questions.\n"
         "Return only one token: a command token or chat.\n\n"
         f"{options}\n\nUser request:\n{message}"
     )
