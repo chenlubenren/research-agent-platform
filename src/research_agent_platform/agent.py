@@ -80,7 +80,7 @@ from .presentation import (
     build_slide_prompt,
     collect_workspace_evidence,
     compose_slide_preview,
-    crop_slide_image,
+    fit_slide_image,
     enforce_presentation_page_mix,
     extract_presentation_assets,
     parse_slide_content,
@@ -3726,7 +3726,7 @@ class ResearchAgentService:
             if slide.render_mode == "image2_full":
                 generated_relative_path = f"presentation/generated/SLIDE_{slide.number:02d}.png"
                 generated_path = workspace_root / generated_relative_path
-                prompt = build_slide_prompt(slide, template, mode)
+                prompt = build_slide_prompt(slide, template, mode, objective=task.objective)
                 if session_context:
                     prompt = prompt + "\n\nSession context:\n" + session_context
                 prompt_artifact = self._write_text(
@@ -3759,7 +3759,7 @@ class ResearchAgentService:
                     generated_artifact = self._write_bytes(
                         task,
                         generated_relative_path,
-                        crop_slide_image(image.image_bytes),
+                        fit_slide_image(image.image_bytes),
                         kind="image",
                         description=f"Complete standalone Image-2 slide {slide.number}.",
                     )

@@ -28,6 +28,7 @@ from research_agent_platform.presentation import (
     select_presentation_template,
     PresentationAsset,
     SlideRender,
+    SlideSpec,
     WorkspaceEvidence,
 )
 from research_agent_platform.artifacts.store import ArtifactStore
@@ -77,6 +78,41 @@ def test_slide_content_parsing_and_deck_assembly(tmp_path: Path):
     deck = Presentation(io.BytesIO(deck_bytes))
     assert len(deck.slides) == 2
     assert deck.slide_width / deck.slide_height == 16 / 9
+
+
+def test_image2_fit_preserves_top_and_bottom_content(tmp_path: Path):
+    source = Image.new("RGB", (1536, 1024), color=(20, 20, 20))
+    pixels = source.load()
+    for x in range(source.width):
+        pixels[x, 0] = (220, 40, 40)
+        pixels[x, source.height - 1] = (40, 80, 220)
+    raw = io.BytesIO()
+    source.save(raw, format="PNG")
+
+    fitted = Image.open(io.BytesIO(crop_slide_image(raw.getvalue())))
+    assert fitted.size == (1536, 864)
+    top_pixel = fitted.getpixel((768, 0))
+    bottom_pixel = fitted.getpixel((768, 863))
+    assert top_pixel[0] > 150 and top_pixel[0] > top_pixel[2]
+    assert bottom_pixel[2] > 150 and bottom_pixel[2] > bottom_pixel[0]
+
+
+def test_image2_prompt_uses_user_topic_not_stage_report_as_subject():
+    slide = SlideSpec(
+        number=1,
+        title="可解释机器学习的研究问题",
+        content="### On-Slide Text\n- 解释模型预测依据。",
+        source_files=(),
+    )
+    prompt = build_slide_prompt(
+        slide,
+        select_presentation_template("阶段汇报", "stage"),
+        "stage",
+        objective="请制作关于可解释机器学习的阶段性汇报 PPT",
+    )
+    assert "可解释机器学习" in prompt
+    assert "只是交付格式，绝不是研究主题" in prompt
+    assert "不要生成关于如何做汇报" in prompt
 
 
 def test_slide_content_parsing_accepts_top_level_slide_headings():

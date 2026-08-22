@@ -1079,6 +1079,7 @@ def build_slide_prompt(
     template: PresentationTemplate,
     mode: str,
     asset: PresentationAsset | None = None,
+    objective: str = "",
 ) -> str:
     purpose = "阶段性研究汇报" if mode == "stage" else "论文汇报"
     if slide.render_mode == "evidence":
@@ -1089,8 +1090,15 @@ def build_slide_prompt(
         )
     on_slide_text = _on_slide_text(slide.content)
     visual_direction = _extract_labeled_section(slide.content, "Visual", "视觉")
+    user_objective = re.sub(r"\s+", " ", str(objective or "").strip())
+    topic_boundary = user_objective or slide.title
     return (
-        f"设计并生成一张完整的16:9 {purpose}页面。这张图片本身就是最终PPT页面，不是背景或底板。\n"
+        f"设计并生成一张完整的16:9页面。这张图片本身就是最终PPT页面，不是背景或底板。\n"
+        f"用户要求的原始主题/任务（唯一内容边界）：{topic_boundary}\n"
+        "严格遵守：上面的用户主题才是页面要讲的内容；“阶段性研究汇报”和“论文汇报”只是交付格式，"
+        "绝不是研究主题。不要生成关于如何做汇报、汇报流程、阶段性汇报模板或 PPT 制作本身的页面。"
+        "页面标题、正文和视觉必须直接服务于用户主题与本页叙事角色。\n"
+        f"交付格式：{purpose}。\n"
         f"模板：{template.label}。{template.prompt}\n"
         f"页面类型：{slide.page_type}。版式方向：{slide.layout_hint}。\n"
         "直接完成构图、文字层级、图形语言和视觉节奏。不要预留后续拼图区域，不要生成空卡片、空框、"
@@ -1219,12 +1227,13 @@ def assemble_mixed_deck(
         if render.slide.render_mode == "image2_full":
             if render.base_image is None:
                 raise ValueError(f"Slide {render.slide.number} is missing its complete Image-2 page.")
-            slide.shapes.add_picture(
-                str(render.base_image),
+            _add_contained_picture(
+                slide,
+                render.base_image,
                 0,
                 0,
-                width=deck.slide_width,
-                height=deck.slide_height,
+                deck.slide_width,
+                deck.slide_height,
             )
         else:
             if render.asset is None:
@@ -1568,22 +1577,26 @@ def resolve_slide_source_image(slide: SlideSpec, evidence: WorkspaceEvidence, wo
     return None
 
 
-def crop_slide_image(image_bytes: bytes) -> bytes:
-    with Image.open(io.BytesIO(image_bytes)) as image:
-        image = image.convert("RGB")
-        target_ratio = 16 / 9
-        current_ratio = image.width / image.height
-        if current_ratio > target_ratio:
-            target_width = int(image.height * target_ratio)
-            left = (image.width - target_width) // 2
-            image = image.crop((left, 0, left + target_width, image.height))
-        elif current_ratio < target_ratio:
-            target_height = int(image.width / target_ratio)
-            top = (image.height - target_height) // 2
-            image = image.crop((0, top, image.width, top + target_height))
+def fit_slide_image(image_bytes: bytes, *, canvas_size: tuple[int, int] = (1536, 864)) -> bytes:
+    """Fit an Image-2 render into 16:9 without cropping or stretching it."""
+
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image = source.convert("RGB")
+        canvas_width, canvas_height = canvas_size
+        image.thumbnail((canvas_width, canvas_height), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (canvas_width, canvas_height), color=(255, 255, 255))
+        left = (canvas_width - image.width) // 2
+        top = (canvas_height - image.height) // 2
+        canvas.paste(image, (left, top))
         output = io.BytesIO()
-        image.save(output, format="PNG", optimize=True)
+        canvas.save(output, format="PNG", optimize=True)
         return output.getvalue()
+
+
+def crop_slide_image(image_bytes: bytes) -> bytes:
+    """Backward-compatible alias for the non-destructive slide fit helper."""
+
+    return fit_slide_image(image_bytes)
 
 
 def assemble_image_deck(slide_paths: list[Path], title: str = "Research Presentation") -> bytes:
@@ -1597,12 +1610,13 @@ def assemble_image_deck(slide_paths: list[Path], title: str = "Research Presenta
     blank_layout = deck.slide_layouts[6]
     for slide_path in slide_paths:
         slide = deck.slides.add_slide(blank_layout)
-        slide.shapes.add_picture(
-            str(slide_path),
+        _add_contained_picture(
+            slide,
+            slide_path,
             0,
             0,
-            width=deck.slide_width,
-            height=deck.slide_height,
+            deck.slide_width,
+            deck.slide_height,
         )
     output = io.BytesIO()
     deck.save(output)

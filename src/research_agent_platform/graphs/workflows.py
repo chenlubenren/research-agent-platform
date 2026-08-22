@@ -1057,6 +1057,8 @@ def workflow_registry() -> dict[str, WorkflowDefinition]:
                     instruction=(
                         "Read only the frozen presentation SourceSet supplied in the context. Detect whether this is a stage report "
                         "or a paper talk, extract the problem, method, progress, evidence, limitations, and next steps, "
+                        "Treat the user's Objective as the actual research topic. Stage-report/paper-talk labels describe only the "
+                        "delivery format; never make the presentation itself, slide-making process, or report template the subject. "
                         "then prepare a slide-by-slide story and page-level rendering plan. Every slide must specify Page Type, "
                         "Render Mode, Layout Hint, one claim, and source files. Use image2_full for cover, section, explanation, "
                         "synthesis, and conclusion pages; Image-2 will create the complete page and nothing may be overlaid later. "

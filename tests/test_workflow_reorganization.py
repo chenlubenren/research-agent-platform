@@ -529,11 +529,13 @@ def test_presentation_pipeline_passes_session_context(service: ResearchAgentServ
 
     recorded: dict[str, str] = {}
 
-    def fake_build_slide_prompt(slide, template, mode, asset=None):
+    def fake_build_slide_prompt(slide, template, mode, asset=None, objective=""):
         recorded["slide_title"] = slide.title
+        recorded["objective"] = objective
         return "slide prompt"
 
     monkeypatch.setattr(agent_module, "build_slide_prompt", fake_build_slide_prompt)
     asyncio.run(service._write_presentation_delivery_artifacts(task))
 
     assert recorded["slide_title"] == "Result"
+    assert recorded["objective"] == "make a ppt"
