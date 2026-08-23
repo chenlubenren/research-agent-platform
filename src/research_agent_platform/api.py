@@ -750,6 +750,19 @@ def _cloud_workspace_url(session: Any) -> str:
     )
 
 
+def _is_cloud_link_lookup(message: str) -> bool:
+    """Keep a focused link lookup from being prefixed with the welcome card."""
+    normalized = "".join(str(message).lower().split())
+    return agent._is_cloud_workspace_link_question(normalized)
+
+
+def _consume_first_turn_intro(session: Any, message: str) -> bool:
+    if session is None:
+        return False
+    first_turn = agent.store.consume_first_turn_intro(session.user_id)
+    return bool(first_turn and not _is_cloud_link_lookup(message))
+
+
 def _first_turn_text(session: Any) -> str:
     """Build the one-time pure-text welcome/workspace handoff."""
     lines = [TEXT_FIRST_TURN_INTRO]
@@ -975,7 +988,7 @@ async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
         sync_workspace=False,
     )
     session = agent.store.load_session(result["session_id"])
-    if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+    if _consume_first_turn_intro(session, message):
         intro = _first_turn_router_text(session)
         if intro:
             result["text"] = f"{intro}\n\n{result['text']}"
@@ -1296,7 +1309,7 @@ async def chat_completions(
         session = agent.store.load_session(result["session_id"])
         intro = ""
         result_text = result["text"]
-        if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+        if _consume_first_turn_intro(session, latest_user):
             intro = _first_turn_text(session)
         if intro:
             result["text"] = f"{intro}\n\n{result['text']}"
@@ -1350,7 +1363,7 @@ async def chat_completions(
     # 90-second timeouts/429s.
     agent_result = await agent.chat(session_id, latest_user, user_id, sync_workspace=False)
     session = agent.store.load_session(agent_result["session_id"])
-    if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+    if _consume_first_turn_intro(session, latest_user):
         intro = _first_turn_text(session)
         if intro:
             if agent_result.get("status") == "idle" and not agent_result.get("task_id"):
@@ -1376,7 +1389,7 @@ async def responses(
         user_id = str(payload.get("user"))
     result = await agent.chat(session_id, str(payload.get("input", "")), user_id, sync_workspace=False)
     session = agent.store.load_session(result["session_id"])
-    if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+    if _consume_first_turn_intro(session, str(payload.get("input", ""))):
         intro = _first_turn_text(session)
         if intro:
             result["text"] = f"{intro}\n\n{result['text']}"
