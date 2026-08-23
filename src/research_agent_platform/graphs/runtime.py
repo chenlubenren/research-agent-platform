@@ -10,6 +10,7 @@ from langgraph.types import Command, interrupt
 
 from ..config import config
 from ..models import ApprovalCheckpoint, TaskRun
+from ..router.intent import route_message
 from .checkpointer import PersistentMemorySaver
 from .workflows import StageDefinition, WorkflowDefinition
 
@@ -21,6 +22,19 @@ class WorkflowGraphState(TypedDict, total=False):
     task_id: str
     revision_feedback: str
     approval_decision: str
+
+
+class IntentGraphState(TypedDict, total=False):
+    """Input/output state for the pre-workflow intent gate.
+
+    ``route`` is either a ``RouteDecision`` or ``None`` (plain text chat).
+    Keeping this gate as a tiny graph makes the decision explicit and keeps
+    workflow graphs focused on artifact execution and human checkpoints.
+    """
+
+    message: str
+    context: str
+    route: Any
 
 
 class LangGraphWorkflowRuntime:
@@ -38,6 +52,27 @@ class LangGraphWorkflowRuntime:
             command: self._compile_workflow_graph(workflow)
             for command, workflow in workflows.items()
         }
+        self.intent_graph = self._compile_intent_graph()
+
+    async def classify_intent(self, message: str, context: str = "") -> Any:
+        """Run the LLM-backed intent gate before choosing chat or a workflow."""
+        state = await self.intent_graph.ainvoke({"message": message, "context": context})
+        return state.get("route")
+
+    def _compile_intent_graph(self):
+        builder = StateGraph(IntentGraphState)
+
+        async def classify_node(state: IntentGraphState) -> IntentGraphState:
+            route = await route_message(
+                str(state.get("message", "")),
+                str(state.get("context", "")),
+            )
+            return {"route": route}
+
+        builder.add_node("intent_classification", classify_node)
+        builder.add_edge(START, "intent_classification")
+        builder.add_edge("intent_classification", END)
+        return builder.compile(name="intent-classification")
 
     async def start_task(self, task: TaskRun, workflow: WorkflowDefinition) -> dict:
         await self.graphs[workflow.command].ainvoke(

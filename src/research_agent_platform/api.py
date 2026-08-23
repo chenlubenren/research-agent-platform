@@ -22,7 +22,6 @@ from .uploads import (
     sanitize_upload_filename,
     upload_artifact_kind,
 )
-from .router.intent import has_execution_intent, is_informational_question
 
 
 CHAT_PAGE = """<!doctype html>
@@ -965,37 +964,24 @@ async def api_create_session(payload: dict[str, Any] | None = None) -> dict[str,
 async def api_agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
     user_id = str(payload.get("user_id") or "local")
     message = str(payload.get("message", ""))
-    if is_informational_question(message) or not has_execution_intent(message):
-        result = await agent.chat(payload.get("session_id"), message, user_id, sync_workspace=False)
-        session = agent.store.load_session(result["session_id"])
-        if session is not None and agent.store.consume_first_turn_intro(session.user_id):
-            result["text"] = f"{_first_turn_router_text(session)}\n\n{result['text']}"
-        return result
-    session = await agent._prepare_chat_session(
+    # The LangGraph intent gate is the single source of truth for whether the
+    # turn is plain text or a workflow.  Do not duplicate keyword routing in
+    # the HTTP adapter, otherwise an ordinary question can become a background
+    # file task before the graph sees it.
+    result = await agent.start_chat(
         payload.get("session_id"),
         message,
         user_id,
         sync_workspace=False,
     )
-    touch_workspace_access(session.workspace_root)
-    intro = ""
-    if agent.store.consume_first_turn_intro(session.user_id):
-        intro = FIRST_TURN_INTRO
-    task = await agent._create_chat_task(session, message, sync_workspace=False)
-    schedule_task(task.task_id, "start")
-    return {
-        "session_id": session.session_id,
-        "task_id": task.task_id,
-        "status": "running",
-        "command": task.command,
-        "workflow_title": task.workflow_title,
-        "artifact_root": task.artifact_root,
-        "artifacts": [],
-        "progress": task.progress_log[-10:],
-        "checkpoint": None,
-        "cloud_workspace": session.cloud_workspace.model_dump(),
-        "text": (f"{intro}\n\n" if intro else "") + BACKGROUND_ACK,
-    }
+    session = agent.store.load_session(result["session_id"])
+    if session is not None and agent.store.consume_first_turn_intro(session.user_id):
+        intro = _first_turn_router_text(session)
+        if intro:
+            result["text"] = f"{intro}\n\n{result['text']}"
+    if result.get("task_id"):
+        schedule_task(result["task_id"], "start")
+    return result
 
 @app.post("/api/session/files")
 async def api_upload_session_files(
@@ -1304,31 +1290,19 @@ async def chat_completions(
         latest_user = "Please summarize the current task state."
 
     if payload.get("stream"):
-        if is_informational_question(latest_user) or not has_execution_intent(latest_user):
-            result = await agent.chat(session_id, latest_user, user_id, sync_workspace=False)
-            session = agent.store.load_session(result["session_id"])
-            if session is not None and agent.store.consume_first_turn_intro(session.user_id):
-                result["text"] = f"{_first_turn_text(session)}\n\n{result['text']}"
-
-            async def direct_event_stream():
-                yield _openai_stream_chunk(chat_completion_stream_payload(payload, result))
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                direct_event_stream(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-        session = await agent._prepare_chat_session(session_id, latest_user, user_id, sync_workspace=False)
+        # Use the same LangGraph intent gate as the non-streaming endpoints;
+        # the transport must not make its own keyword-based task decision.
+        result = await agent.start_chat(session_id, latest_user, user_id, sync_workspace=False)
+        session = agent.store.load_session(result["session_id"])
         intro = ""
-        if agent.store.consume_first_turn_intro(session.user_id):
+        result_text = result["text"]
+        if session is not None and agent.store.consume_first_turn_intro(session.user_id):
             intro = _first_turn_text(session)
-        task = await agent._create_chat_task(session, latest_user, sync_workspace=False)
-        schedule_task(task.task_id, "start")
+        if intro:
+            result["text"] = f"{intro}\n\n{result['text']}"
+        task = agent.get_task(result["task_id"]) if result.get("task_id") else None
+        if task is not None:
+            schedule_task(task.task_id, "start")
 
         async def event_stream():
             if intro:
@@ -1349,12 +1323,12 @@ async def chat_completions(
                 chat_completion_stream_payload(
                     payload,
                     {
-                        "text": BACKGROUND_ACK,
-                        "task_id": task.task_id,
-                        "status": "running",
-                        "artifact_root": task.artifact_root,
-                        "session_id": session.session_id,
-                        "progress": task.progress_log[-10:],
+                        "text": result_text,
+                        "task_id": result.get("task_id", ""),
+                        "status": result.get("status", "idle"),
+                        "artifact_root": result.get("artifact_root", ""),
+                        "session_id": result["session_id"],
+                        "progress": result.get("progress", []),
                     },
                 )
             )

@@ -121,12 +121,8 @@ from .reference_expansion import (
 )
 from .router.intent import (
     RouteDecision,
-    explicit_route,
-    has_execution_intent,
-    is_informational_question,
     is_approval_message,
     is_stop_message,
-    route_message,
 )
 from .state.store import StateStore
 from .upstream import generate_image, generate_text
@@ -372,12 +368,13 @@ class ResearchAgentService:
             direct_reply = self._direct_chat_response("".join(message.lower().split()))
             if direct_reply is not None:
                 reply = await self._chat_reply(session)
-            elif is_informational_question(message) or not has_execution_intent(message):
-                reply = await self._chat_reply(session, latest_message=message)
             else:
-                route = await route_message(message, session_context)
+                # Every non-trivial turn passes through the LangGraph intent
+                # gate.  It decides whether this is plain text chat or an
+                # artifact workflow before any task is created.
+                route = await self.runtime.classify_intent(message, session_context)
                 if route is None:
-                    reply = await self._chat_reply(session)
+                    reply = await self._chat_reply(session, latest_message=message)
                 else:
                     reply = await self._start_task(session, message, route)
 
@@ -399,19 +396,9 @@ class ResearchAgentService:
         if active_task and active_task.status == "waiting_human":
             reply = await self._handle_waiting_task(session, active_task, message)
         else:
-            route = explicit_route(message)
+            route = await self.runtime.classify_intent(message, self._session_context(session))
             if route is None:
-                if is_informational_question(message) or not has_execution_intent(message):
-                    reply = await self._chat_reply(session, latest_message=message)
-                else:
-                    task = await self._create_chat_task(session, message, sync_workspace=sync_workspace)
-                    reply = self._build_reply(
-                        task,
-                        text=(
-                            f"已接收问题，任务 `{task.task_id}` 正在后台处理。"
-                            "路由、模型调用和回答完成状态将通过 SSE 推送。"
-                        ),
-                    )
+                reply = await self._chat_reply(session, latest_message=message)
             else:
                 task = await self._create_task(session, message, route, sync_workspace=sync_workspace)
                 if task.status == "failed":
@@ -440,9 +427,9 @@ class ResearchAgentService:
         direct_reply = self._direct_chat_response("".join(task.objective.lower().split()))
         if workspace_reply is not None:
             direct_reply = workspace_reply
-        elif is_informational_question(task.objective) or not has_execution_intent(task.objective):
-            direct_reply = (await self._chat_reply(session, latest_message=task.objective))["text"]
-        route = None if direct_reply is not None else await route_message(task.objective, session_context)
+        route = None if direct_reply is not None else await self.runtime.classify_intent(
+            task.objective, session_context
+        )
         if route is not None:
             task.command = route.command
             task.route_source = route.source
@@ -867,6 +854,8 @@ class ResearchAgentService:
             "idea discovery, experiment planning, paper drafting, rebuttal, and research memory. Mention commands such as "
             "/review, /idea, /plan, /code, /write, /rebuttal, /fig, /present, and /wiki when relevant. "
             "Do not describe yourself as a generic assistant. Do not create a workflow task unless the user explicitly requests one. "
+            "When the user asks for the current Tsinghua cloud workspace link, answer that lookup directly; "
+            "do not tell them to send a public share link or list supported file types unless they asked about that. "
             f"{CLOUD_DELIVERY_SYSTEM_POLICY}"
         )
         if session_context:
@@ -1083,16 +1072,62 @@ class ResearchAgentService:
                 "工作区哪里",
                 "工作空间链接",
                 "工作空间在哪",
+                "清华网盘链接",
+                "清华网盘工作区",
+                "清华云盘链接",
+                "网盘链接是什么",
+                "网盘链接在哪",
                 "workspace是什么",
                 "workspace链接",
                 "whatistheworkspace",
             )
         )
 
+    def _is_cloud_workspace_link_question(self, normalized_message: str) -> bool:
+        """Recognize a lookup for this session's Tsinghua cloud URL."""
+        if not normalized_message:
+            return False
+        lookup_terms = (
+            "是什么",
+            "是啥",
+            "在哪",
+            "哪里",
+            "哪儿",
+            "给我",
+            "告诉我",
+            "查看",
+            "获取",
+            "我的",
+            "whatismy",
+            "whereismy",
+        )
+        cloud_terms = (
+            "清华网盘链接",
+            "清华网盘工作区链接",
+            "清华云盘链接",
+            "网盘工作区链接",
+            "网盘链接",
+        )
+        # A bare public-share-link input must still reach the normal source or
+        # download workflow; only lookup-style language is handled here.
+        return any(term in normalized_message for term in cloud_terms) and any(
+            term in normalized_message for term in lookup_terms
+        )
+
     def _workspace_info_reply(self, session: ChatSession, message: str) -> str | None:
         normalized = "".join(message.lower().split())
         if not self._is_workspace_question(normalized):
             return None
+        if self._is_cloud_workspace_link_question(normalized):
+            cloud = session.cloud_workspace
+            cloud_url = self._cloud_workspace_url(cloud)
+            if cloud.status == "synced" and cloud_url:
+                return f"你的清华网盘工作区链接：{cloud_url}"
+            if cloud.status in {"pending", "error"}:
+                return "你的清华网盘工作区链接正在生成中，完成后会自动显示在当前会话。"
+            if cloud.status == "disabled":
+                return "当前会话的清华网盘同步未启用，暂时没有可用链接。"
+            return "你的清华网盘工作区链接正在生成中，完成后会自动显示在当前会话。"
         lines = [
             "工作区是当前会话专属的研究文件夹，用来保存上传资料、生成的论文/图表/PPT和过程记录。",
             "继续在当前会话提问会复用同一个工作区；点击“新会话”才会创建新的独立工作区。",

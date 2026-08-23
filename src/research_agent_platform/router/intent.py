@@ -428,6 +428,9 @@ async def route_message(message: str, context: str = "") -> RouteDecision | None
     if explicit is not None:
         return explicit
 
+    # These high-signal non-execution cases stay in text chat without a
+    # provider round-trip.  The LangGraph node still owns the overall gate;
+    # this guard prevents a keyword such as “PPT” from ever creating a task.
     if is_informational_question(stripped):
         return None
 
@@ -440,24 +443,17 @@ async def route_message(message: str, context: str = "") -> RouteDecision | None
     if _looks_like_artifact_location_question(stripped):
         return None
 
-    lowered = stripped.lower()
-    best_command = ""
-    best_score = (0, 0)
-    for command, keywords in HEURISTICS.items():
-        matches = [keyword for keyword in keywords if keyword.lower() in lowered]
-        score = (len(matches), sum(len(keyword) for keyword in matches))
-        if score > best_score:
-            best_command = command
-            best_score = score
-    if best_command and best_score[0] > 0 and has_execution_intent(stripped):
-        return RouteDecision(
-            command=best_command,
-            source="implicit_heuristic",
-            reason=f"keyword heuristic matches={best_score[0]} specificity={best_score[1]}",
-            workflow_mode=_publication_mode(best_command, stripped)[0],
-            skill_bundle=_publication_mode(best_command, stripped)[1],
-        )
+    # A bare artifact keyword (for example, “PPT”) is ordinary chat.  Only
+    # send messages with at least a spoken request cue to the semantic model.
+    if not has_execution_intent(stripped) and not any(
+        cue in "".join(stripped.lower().split())
+        for cue in ("帮我", "我要", "我想", "我需要", "给我", "来个", "整一个", "弄个")
+    ):
+        return None
 
+    # Let the language model make the primary semantic decision.  The local
+    # keyword route below remains a deterministic fallback for provider
+    # outages, malformed classifier output, and tests with a stub upstream.
     options = "\n".join(f"{name}: {description}" for name, description in COMMAND_DESCRIPTIONS.items())
     classifier_prompt = (
         "Classify the user's request into exactly one command from the list below, or return chat.\n"
@@ -470,21 +466,62 @@ async def route_message(message: str, context: str = "") -> RouteDecision | None
     )
     if context.strip():
         classifier_prompt += f"\n\nSession context:\n{context.strip()}"
-    raw = await generate_text(
-        system_prompt="You are a strict intent router. Output one token only.",
-        user_prompt=classifier_prompt,
-        temperature=0,
-    )
-    command = raw.strip().splitlines()[0].strip()
+    try:
+        raw = await generate_text(
+            system_prompt="You are a strict intent router. Output one token only.",
+            user_prompt=classifier_prompt,
+            temperature=0,
+        )
+    except Exception:
+        # Routing must never make the chat endpoint unavailable.  If the
+        # classifier is unavailable, continue to the deterministic fallback
+        # below rather than losing a clearly executable request.
+        raw = ""
+    first_line = raw.strip().splitlines()[0].strip() if raw else ""
+    command_token = first_line.strip("`'\".,:; ")
+    # Be tolerant of a provider adding a short label around the token while
+    # still requiring an allow-listed workflow command.
+    command = ALIASES.get(command_token, command_token)
     if command.lower() == "chat":
-        return None
-    command = ALIASES.get(command, command)
+        command = ""
     if command not in COMMAND_DESCRIPTIONS:
+        match = re.search(r"/(?:review|download|idea|plan|code|fig|write|rebuttal|present|wiki)\b", raw or "", re.I)
+        command = ALIASES.get(match.group(0).lower(), match.group(0).lower()) if match else ""
+    if command and not is_informational_question(stripped) and has_execution_intent(stripped):
+        workflow_mode, skill_bundle = _publication_mode(command, stripped)
+        return RouteDecision(
+            command=command,
+            source="implicit_llm",
+            reason=f"llm classifier -> {command}",
+            workflow_mode=workflow_mode,
+            skill_bundle=skill_bundle,
+        )
+
+    # Informational questions are always kept in text chat, even if a noisy
+    # classifier guessed a workflow from a keyword such as “PPT” or “图”.
+    if is_informational_question(stripped):
         return None
-    if not has_execution_intent(stripped):
-        return None
-    workflow_mode, skill_bundle = _publication_mode(command, stripped)
-    return RouteDecision(command=command, source="implicit_llm", reason=f"llm classifier -> {command}", workflow_mode=workflow_mode, skill_bundle=skill_bundle)
+
+    # Deterministic fallback for an unavailable or non-conforming upstream.
+    lowered = stripped.lower()
+    best_command = ""
+    best_score = (0, 0)
+    for fallback_command, keywords in HEURISTICS.items():
+        matches = [keyword for keyword in keywords if keyword.lower() in lowered]
+        score = (len(matches), sum(len(keyword) for keyword in matches))
+        if score > best_score:
+            best_command = fallback_command
+            best_score = score
+    if best_command and best_score[0] > 0 and has_execution_intent(stripped):
+        return RouteDecision(
+            command=best_command,
+            source="implicit_heuristic",
+            reason=f"keyword fallback matches={best_score[0]} specificity={best_score[1]}",
+            workflow_mode=_publication_mode(best_command, stripped)[0],
+            skill_bundle=_publication_mode(best_command, stripped)[1],
+        )
+
+    return None
 
 
 def is_informational_question(message: str) -> bool:

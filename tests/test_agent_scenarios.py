@@ -8,6 +8,7 @@ from pptx import Presentation
 
 from research_agent_platform import agent as agent_module
 from research_agent_platform.agent import ResearchAgentService
+from research_agent_platform.models import CloudWorkspaceState
 
 from .conftest import run
 
@@ -30,6 +31,26 @@ def test_workspace_question_is_deterministic_and_explains_session_scope(service:
     assert "清华网盘同步未启用" in result["text"]
     assert "HTTPStatusError" not in result["text"]
     assert "agent-workspace" not in result["text"]
+
+
+def test_tsinghua_cloud_link_question_returns_only_the_current_workspace_url(
+    service: ResearchAgentService,
+):
+    session = service.store.get_or_create_session(None, "local")
+    session.cloud_workspace = CloudWorkspaceState(
+        status="synced",
+        configured=True,
+        preview_url="https://cloud.tsinghua.edu.cn/d/example/",
+    )
+    service.store.save_session(session)
+
+    result = run(service.chat(session.session_id, "我的清华网盘链接是什么"))
+
+    assert result["status"] == "idle"
+    assert result["task_id"] == ""
+    assert result["text"] == "你的清华网盘工作区链接：https://cloud.tsinghua.edu.cn/d/example/"
+    assert "公开分享链接" not in result["text"]
+    assert service.list_tasks(session.session_id) == []
 
 
 def test_information_question_does_not_create_a_workflow_task(service: ResearchAgentService, monkeypatch):
